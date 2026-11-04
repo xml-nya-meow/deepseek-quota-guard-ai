@@ -1,0 +1,2 @@
+# This lock is verified byte-for-byte in the portable build, including on Windows.
+local_ai/asset-lock.json text eol=lf

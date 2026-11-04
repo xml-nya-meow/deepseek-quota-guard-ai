@@ -1,0 +1,69 @@
+{
+  "provenance": {
+    "source_url": "https://fe-static.deepseek.com/platform/static/4179.a95866c86d.js",
+    "sha256": "7c92bdb484b6bfc54aee93723f1b35915447434d0628fafb064fc4a1706d5bc1",
+    "basis": "Request mappers use the cached public frontend. Two user-supplied console GET responses on 2026-11-04 had code=0, data.biz_code=0 and four entries. All test identities, names, dates and transport responses below are synthetic. The captures contained no delete request or result.",
+    "key_type": {
+      "NORMAL": "Observed on three ordinary rows, including the selected row. Each had a masked sensitive_id and integer created_at. The screenshot showed ordinary delete controls.",
+      "DSH": "Observed on the Harness-managed row with an empty sensitive_id, integer created_at and disabled ordinary management controls on the page.",
+      "USER": "Synthetic legacy value only. Does not qualify an entry for ordinary deletion.",
+      "CASE06": "Synthetic example of an unclassified future type."
+    }
+  },
+  "list_method": "GET",
+  "list_url": "https://platform.deepseek.com/api/v0/users/get_api_keys",
+  "list_response": {
+    "code": 0,
+    "data": {
+      "biz_code": 0,
+      "biz_data": {
+        "api_keys": [
+          {
+            "name": "Fixture target",
+            "tracking_id": "00000000-0000-0000-0000-000000000001",
+            "sensitive_id": "sk-alpha*****0001",
+            "created_at": 1793203200,
+            "last_use": null,
+            "key_type": "NORMAL",
+            "is_exp": false
+          },
+          {
+            "name": "Fixture target",
+            "tracking_id": "00000000-0000-0000-0000-000000000002",
+            "sensitive_id": "sk-bravo*****0002",
+            "created_at": 1793203201,
+            "last_use": null,
+            "key_type": "NORMAL",
+            "is_exp": false
+          },
+          {
+            "name": "Fixture survivor",
+            "tracking_id": "00000000-0000-0000-0000-000000000003",
+            "sensitive_id": "sk-charlie*****0003",
+            "created_at": 1793203202,
+            "last_use": null,
+            "key_type": "NORMAL",
+            "is_exp": false
+          }
+        ],
+        "key_quota": {}
+      }
+    }
+  },
+  "delete_method": "POST",
+  "delete_url": "https://platform.deepseek.com/api/v0/users/edit_api_keys",
+  "delete_body": {
+    "action": "delete",
+    "name": null,
+    "redacted_key": "sk-alpha*****0001",
+    "created_at": 1793203200,
+    "tracking_id": "00000000-0000-0000-0000-000000000001"
+  },
+  "synthetic_delete_response": {
+    "code": 0,
+    "data": {
+      "biz_code": 0,
+      "biz_data": null
+    }
+  }
+}

@@ -1,0 +1,72 @@
+name: 问题反馈
+description: 提交可复现的问题及必要的脱敏诊断信息
+title: "[问题] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢帮助完善 DeepSeek 额度管理器。软件目前只完成部分验证，仍可能有 bug。
+
+        **此 Issue 完全公开。** 不要上传真实 API Key、Cookie、Authorization、密码、账户或人员标识、真实账本、完整日志目录、浏览器资料或含这些信息的截图。请先移除姓名、完整 Tracking ID、本机路径等，只保留必要原因码与步骤。不会脱敏时，先只写文字说明，不附文件。
+  - type: input
+    id: version
+    attributes:
+      label: 程序版本与运行环境
+      description: 填写窗口标题中的完整版本、Windows 版本；不需要填写用户名或电脑名。
+      placeholder: 例如 0.2.0a1，Windows 11
+    validations:
+      required: true
+  - type: input
+    id: period
+    attributes:
+      label: 统计日期与故障时间
+      description: 填写统计起点、截止日期以及发生时间（含时区）；不涉及费用时可填“不适用”。
+      placeholder: 起点 YYYY-MM-DD，截止 YYYY-MM-DD，发生于 HH:mm（UTC+8）
+    validations:
+      required: true
+  - type: dropdown
+    id: action
+    attributes:
+      label: 发生问题的操作
+      options:
+        - 登录或重新登录
+        - 手动读取费用
+        - 全自动管理
+        - 强制删除或删除准备检查
+        - 新建列表或编辑表格
+        - Excel/WPS 导入导出
+        - 启动、窗口或其他问题
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 操作步骤与当时状态
+      description: 按顺序写明点击了什么、是否开启全自动管理、是否同时运行旧版本。仅报告已有现象，不需要为了反馈重复删除或增加消费。
+      placeholder: |
+        1. ……
+        2. ……
+        当时全自动管理：开启 / 停止
+        是否同时运行其他版本：是 / 否 / 不确定
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: 预期结果与实际结果
+      description: 写明按钮、状态栏或弹窗文字；如果涉及删除，请说明“未提交 / 已提交待核实 / 已核实缺席 / 不确定”，不要按页面变化自行认定成功。
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 必要的脱敏日志或原因码（可选）
+      description: 只贴对应时间附近的必要片段。删除 Key、授权头、Cookie、姓名、账户标识、Tracking ID 和本机路径；不确定就留空，不要附完整目录。
+      render: text
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: 公开信息确认
+      options:
+        - label: 我已检查正文及附件，没有包含真实 Key、登录凭据、账户或人员标识、真实账本和浏览器资料。
+          required: true

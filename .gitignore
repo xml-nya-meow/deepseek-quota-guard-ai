@@ -1,0 +1,100 @@
+# Python and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Generated builds and downloaded browser components
+build/
+dist/
+build-cache/
+.quota-build-*/
+browser-runtime/
+local-ai/
+*.gguf
+ai-smoke.json
+便携版/
+*.spec
+*.exe
+*.dll
+*.zip
+*.7z
+
+# Local user data, bills, browser sessions and logs
+data/
+test-data/
+smoke-data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.xlsx
+!templates/人员额度模板.xlsx
+*.xls
+*.csv
+*.tsv
+*.jsonl
+*.log
+管理设置.json
+当前账本.json
+界面偏好.json
+外观偏好.json
+账本/
+.new-ledger-*/
+运行日志-*
+运行摘要-*
+浏览器会话/
+临时诊断日志/
+临时浏览器/
+.quota-browser-owner.json
+.quota-recovery.lock
+.运行锁
+.初始化*
+.initial*
+browser-smoke.json
+BUILD-INFO.json
+*.bak
+*.tmp
+
+# Browser profiles and captured authentication/session material
+Cookies
+Cookies-journal
+Login Data
+Login Data-journal
+Login Data For Account
+Login Data For Account-journal
+Local State
+Preferences
+Secure Preferences
+Web Data
+Web Data-journal
+History
+History-journal
+Session Storage/
+SessionStorage/
+Local Storage/
+IndexedDB/
+Service Worker/
+Sessions/
+DevToolsActivePort
+.auth/
+storage_state*.json
+storage-state*.json
+browser-state*.json
+*.har
+
+# Editor and operating-system files
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store
