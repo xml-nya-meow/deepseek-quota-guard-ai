@@ -57,22 +57,10 @@ jobs:
       - name: Smoke-test without a platform account
         shell: pwsh
         run: |
-          $executable = Join-Path $PWD 'dist/DeepSeekQuotaManager-win-x64/DeepSeekQuotaGuardAI.exe'
-          $smokeRoot = Join-Path $env:RUNNER_TEMP ('quota-smoke-' + [guid]::NewGuid())
-          New-Item -ItemType Directory -Path $smokeRoot | Out-Null
-          foreach ($mode in @('smoke', 'browser-smoke', 'ai-smoke')) {
-            $dataFolder = Join-Path $smokeRoot $mode
-            $arguments = @('--data-dir', ('"' + $dataFolder + '"'), ('--' + $mode))
-            $process = Start-Process -FilePath $executable -ArgumentList $arguments -PassThru -WindowStyle Hidden
-            if (-not $process.WaitForExit(60000)) {
-              $process.Kill($true)
-              throw "Portable $mode timed out."
-            }
-            if ($process.ExitCode -ne 0) { throw "Portable $mode failed." }
-          }
-          $resultPath = Join-Path $smokeRoot 'browser-smoke/browser-smoke.json'
-          $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
-          if ($result.browser_started -ne $true) { throw 'Bundled Chromium did not start.' }
+          $evidence = Join-Path $env:RUNNER_TEMP ('portable-evidence-' + [guid]::NewGuid())
+          python tools/verify_portable_candidate.py --bundle dist/DeepSeekQuotaManager-win-x64 --evidence "$evidence"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item -LiteralPath (Join-Path $evidence 'portable-acceptance.json') -Destination dist/portable-acceptance.json
       - name: Package candidate and checksum
         shell: pwsh
         run: |
@@ -92,5 +80,6 @@ jobs:
           path: |
             dist/*.zip
             dist/*.sha256
+            dist/portable-acceptance.json
           if-no-files-found: error
           retention-days: 14

@@ -137,8 +137,9 @@ def copy_notices(output: Path, versions: dict[str, str]) -> dict[str, str]:
 
 def validate_bundle(output: Path) -> None:
     forbidden_names = {"管理设置.json", "当前账本.json", "界面偏好.json", "外观偏好.json", "账本", "人员额度.xlsx", "状态.db", ".运行锁",
-                       ".初始化中", "browser-smoke.json"}
-    forbidden_prefixes = ("运行日志-", "运行摘要-", "状态.db-")
+                       ".初始化中", "browser-smoke.json", "ai-smoke.json", "acceptance.json",
+                       "OFFLINE-FIXTURE.txt", "ui-smoke.json", "responsibility.sqlite3", "responsibility.anchor.json"}
+    forbidden_prefixes = ("运行日志-", "运行摘要-", "状态.db-", "responsibility.sqlite3-")
     for item in output.rglob("*"):
         if item.name in forbidden_names or item.name.startswith(forbidden_prefixes):
             raise RuntimeError("Build contains application data; the output was not published.")

@@ -61,6 +61,10 @@ smoke-data/
 .初始化*
 .initial*
 browser-smoke.json
+ui-smoke.json
+acceptance.json
+portable-acceptance.json
+offline-acceptance-*/
 BUILD-INFO.json
 *.bak
 *.tmp
