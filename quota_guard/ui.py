@@ -228,6 +228,10 @@ class App:
         self.theme_mode, self.theme_notice = load_theme_mode(self.home_folder)
         self.current_theme = None
         self.theme_timer = None
+        self.workbook_timer = None
+        self.initial_load_timer = None
+        self.initial_load_pending = True
+        self.window_destroyed = False
         self.poll_timer_generation = 0
         self.poll_wait_started = None
         self.rows: list[dict] = []
@@ -243,9 +247,7 @@ class App:
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self._build()
         self._refresh_theme()
-        self.theme_timer = self.root.after(5000, self._watch_theme)
-        self.root.after(60, self.load_folder)
-        self.root.after(1000, self._watch_workbook)
+        self._resume_lifecycle_timers()
 
     def _build(self):
         style = ttk.Style()
@@ -454,13 +456,59 @@ class App:
             label += '（深色）' if theme == 'dark' else '（浅色）'
         self.theme_button.configure(text='外观：' + label)
 
+    def _arm_lifecycle_timer(self, attribute, delay_ms, callback):
+        """Own one pending callback per lifecycle task, never a global Tk sweep."""
+        if self.closing or self.window_destroyed or getattr(self, attribute) is not None:
+            return
+
+        def run():
+            if getattr(self, attribute) != timer:
+                return
+            setattr(self, attribute, None)
+            if not self.closing and not self.window_destroyed:
+                callback()
+
+        run.__name__ = callback.__name__
+        timer = self.root.after(delay_ms, run)
+        setattr(self, attribute, timer)
+
+    def _pause_lifecycle_timers(self):
+        for attribute in ('workbook_timer', 'theme_timer', 'initial_load_timer'):
+            timer = getattr(self, attribute)
+            setattr(self, attribute, None)
+            if timer is not None:
+                self.root.after_cancel(timer)
+
+    def _resume_lifecycle_timers(self):
+        if self.closing or self.window_destroyed:
+            return
+        self._arm_lifecycle_timer('theme_timer', 5000, self._watch_theme)
+        self._arm_lifecycle_timer('workbook_timer', 1000, self._watch_workbook)
+        if self.initial_load_pending:
+            self._arm_lifecycle_timer('initial_load_timer', 60, self._initial_load)
+
+    def _initial_load(self):
+        self.initial_load_pending = False
+        self.load_folder()
+
+    def _resume_after_close_failure(self):
+        self.closing = False
+        self._resume_lifecycle_timers()
+
+    def _destroy_window(self):
+        # Browser completion/cleanup callbacks must finish first. Cancel only
+        # timers owned here; another Tk interpreter may still be processing.
+        self._pause_lifecycle_timers()
+        self._cancel_collection_poll()
+        self.window_destroyed = True
+        self.root.destroy()
+
     def _watch_theme(self):
-        self.theme_timer = None
-        if self.closing:
+        if self.closing or self.window_destroyed:
             return
         if self.theme_mode == 'system':
             self._refresh_theme()
-        self.theme_timer = self.root.after(5000, self._watch_theme)
+        self._arm_lifecycle_timer('theme_timer', 5000, self._watch_theme)
 
     def cycle_theme(self):
         if self.closing:
@@ -767,9 +815,7 @@ class App:
                      and self.collection_source_id == self.store.current_snapshot_id()))
 
     def _watch_workbook(self):
-        if self.closing:
-            # A failed cleanup may keep this same window open for recovery.
-            self.root.after(1000, self._watch_workbook)
+        if self.closing or self.window_destroyed:
             return
         try:
             if self.store is not None and self.validated_hash is not None:
@@ -803,7 +849,7 @@ class App:
             self._invalidate_collection()
             self.error('数据需要核查', exc, dialog=False)
         finally:
-            self.root.after(1000, self._watch_workbook)
+            self._arm_lifecycle_timer('workbook_timer', 1000, self._watch_workbook)
 
     def error(self, title: str, exc: Exception | str, *, dialog=True, next_step=""):
         self.status_var.set(f"{title}：{safe_error(exc)}" + (" " + next_step if next_step else ""))
@@ -1987,7 +2033,7 @@ class App:
         except Exception as exc:
             self.interrupting = False
             self.cleanup_failed = True
-            self.closing = False
+            self._resume_after_close_failure()
             self._action_state("interrupt", "清理失败")
             self._diagnostic("interrupt_failed", error_type=type(exc).__name__)
             self.error("中断清理未完成", exc, dialog=False, next_step="请再次点击“中断当前操作”重试；清理完成前不能重新登录。")
@@ -2008,7 +2054,7 @@ class App:
                 self._diagnostic("interrupt_failed", error_type=type(exc).__name__)
                 self.error("中断清理未完成", exc, dialog=False, next_step="请再次点击“中断当前操作”重试；清理完成前不能重新登录。")
                 if self.closing:
-                    self.closing = False
+                    self._resume_after_close_failure()
                     self._update_buttons()
                 return
             if self.busy:
@@ -2026,7 +2072,7 @@ class App:
             self.progress_var.set("当前操作：空闲")
             self._diagnostic("interrupt_completed", elapsed=elapsed)
             if self.audit_failed:
-                self.closing = False
+                self._resume_after_close_failure()
                 self._audit_notice()
             elif self.closing:
                 self._finish_close()
@@ -2508,16 +2554,17 @@ class App:
             self.folder_lock.close()
             return True
         except Exception as exc:
-            self.closing = False
+            self._resume_after_close_failure()
             self.cleanup_failed = True
             self.error('管理锁尚未释放', exc, dialog=False, next_step='请再次关闭窗口重试；当前不会继续管理。')
             self._update_buttons()
             return False
 
     def close(self):
-        if self.closing:
+        if self.closing or self.window_destroyed:
             return
         self.closing = True
+        self._pause_lifecycle_timers()
         self._diagnostic("close_requested", action=self.current_action or "idle", busy=self.busy)
         self._update_buttons()
         self.interrupt_operation()
@@ -2525,14 +2572,14 @@ class App:
     def _finish_close(self):
         """Cleanup has settled all browser futures before releasing the ledger."""
         if self.audit_failed:
-            self.closing = False
+            self._resume_after_close_failure()
             self._audit_notice()
             return
         if self.browser is None:
             if not self._close_local_locks():
                 return
             self._diagnostic("ui_closed")
-            self.root.destroy()
+            self._destroy_window()
             return
         finished = threading.Event()
         errors = []
@@ -2549,7 +2596,7 @@ class App:
         def wait_close():
             if finished.is_set():
                 if errors:
-                    self.closing = False
+                    self._resume_after_close_failure()
                     self.cleanup_failed = True
                     self._action_state("interrupt", "清理失败")
                     self.error("浏览器关闭未完成", errors[0], dialog=False,
@@ -2557,13 +2604,13 @@ class App:
                     self._diagnostic("close_failed", error_type=type(errors[0]).__name__)
                     return
                 if self.audit_failed:
-                    self.closing = False
+                    self._resume_after_close_failure()
                     self._audit_notice()
                     return
                 if not self._close_local_locks():
                     return
                 self._diagnostic("ui_closed")
-                self.root.destroy()
+                self._destroy_window()
             else:
                 self.root.after(150, wait_close)
         self.root.after(150, wait_close)

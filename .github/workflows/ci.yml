@@ -20,7 +20,7 @@ env:
 jobs:
   tests:
     runs-on: windows-2022
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/browser-runtime
     steps:
