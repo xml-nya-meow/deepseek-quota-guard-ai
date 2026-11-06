@@ -16,6 +16,13 @@ from quota_guard.browser_service import check_identity, key_fingerprint
 from quota_guard.workspace import current_ledger
 
 
+def ready_with_inventory(app, permit):
+    """Synthetic prepared HTTP/DOM evidence, separate from the later UI grant."""
+    permit.set_prepared_inventory(permit.target_tracking_id,
+                                  [key['tracking_id'] for key in app.last_keys])
+    permit.ready.set()
+
+
 class OfflineBrowser:
     def __init__(self, results):
         self.results = results
@@ -209,7 +216,7 @@ class WorkflowTests(unittest.TestCase):
             future = Future()
             permit = kwargs['permit']
             def worker():
-                permit.ready.set()
+                ready_with_inventory(self.app, permit)
                 if not permit.decided.wait(3):
                     future.set_exception(RuntimeError('No permit'))
                     return
@@ -319,7 +326,7 @@ class WorkflowTests(unittest.TestCase):
         self.app.observing = self.app.automatic = True
         self.app._process_next()
         permit = browser.calls[0][1]['permit']
-        permit.ready.set(); self.pump()
+        ready_with_inventory(self.app, permit); self.pump()
         self.assertTrue(permit.allowed)
         self.assertEqual(self.store.latest_action('test-key-a'), 'requested')
         self.app.login()
@@ -586,7 +593,7 @@ class WorkflowTests(unittest.TestCase):
         self.app.observing = self.app.automatic = True
         self.app._process_next()
         permit = browser.calls[0][1]['permit']
-        permit.ready.set(); self.pump()
+        ready_with_inventory(self.app, permit); self.pump()
         self.assertTrue(permit.allowed)
         self.app.stop()
         self.assertIn('已停止', self.app.buttons['stop'].cget('text'))
@@ -630,7 +637,7 @@ class WorkflowTests(unittest.TestCase):
         self.app.observing = self.app.automatic = True
         self.app._process_next()
         permit = browser.calls[0][1]['permit']
-        permit.ready.set(); self.pump()
+        ready_with_inventory(self.app, permit); self.pump()
         self.assertTrue(permit.allowed)
         self.app.interrupt_operation(); self.pump()
         self.assertEqual(self.store.latest_action('test-key-a'), 'unknown_result')
@@ -787,7 +794,7 @@ class WorkflowTests(unittest.TestCase):
         browser = ControlledBrowser(); self.app.browser = browser
         self.app.observing = self.app.automatic = True
         self.app._process_next()
-        permit = browser.calls[0][1]['permit']; permit.ready.set(); self.pump()
+        permit = browser.calls[0][1]['permit']; ready_with_inventory(self.app, permit); self.pump()
         self.assertTrue(permit.allowed)
         with patch.object(self.app.store, 'record_action', side_effect=OSError('fixture full disk')), \
                 patch.object(self.root, 'destroy') as destroy:
@@ -985,7 +992,7 @@ class WorkflowTests(unittest.TestCase):
             result.update(changes)
             return result
         with patch.object(self.app.store, 'action_evidence', side_effect=changed_evidence) as capture:
-            permit.ready.set()
+            ready_with_inventory(self.app, permit)
             self.pump()
         capture.assert_called_once_with('测试甲', 'test-key-a')
         self.assertTrue(permit.decided.is_set())
@@ -1021,7 +1028,7 @@ class WorkflowTests(unittest.TestCase):
                 self.app.collection_observed_monotonic -= COLLECTION_MAX_AGE_SECONDS + 1
             return result
         with patch.object(self.app.store, 'record_action', side_effect=slow_save):
-            permit.ready.set()
+            ready_with_inventory(self.app, permit)
             self.pump()
         self.assertEqual(len(persisted), 1)
         self.assertEqual(persisted[0]['status'], 'requested')
@@ -1132,7 +1139,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.store.latest_action('test-key-b'), 'pending')
         pending = self.store.latest_action_record('test-key-b')
         self.assertEqual(pending['intent'], 'manual_force')
-        permit.ready.set(); self.pump()
+        ready_with_inventory(self.app, permit); self.pump()
         self.assertTrue(permit.allowed)
         self.assertEqual(self.store.latest_action('test-key-b'), 'requested')
         browser.futures[0].set_result({'absent': True}); self.pump(); self.pump()
@@ -1164,7 +1171,7 @@ class WorkflowTests(unittest.TestCase):
         self.app.revoke_selected_once(); self.pump()
         self.assertEqual([a for a, _ in browser.calls], ['read_keys', 'revoke'])
         permit = browser.calls[1][1]['permit']
-        permit.ready.set(); self.pump()
+        ready_with_inventory(self.app, permit); self.pump()
         self.assertTrue(permit.allowed)
         event = self.store.latest_action_record('test-key-b')
         self.assertEqual(event['status'], 'requested')
@@ -1310,7 +1317,7 @@ class WorkflowTests(unittest.TestCase):
         self.app.tree.selection_set('0'); self.app.revoke_selected_once(); self.pump()
         permit = browser.calls[1][1]['permit']
         self.app.stop()
-        permit.ready.set(); self.pump()
+        ready_with_inventory(self.app, permit); self.pump()
         self.assertTrue(permit.decided.is_set())
         self.assertFalse(permit.allowed)
         browser.futures[0].set_result({'cancelled': True}); self.pump()
@@ -1326,7 +1333,7 @@ class WorkflowTests(unittest.TestCase):
         browser = ControlledBrowser(identity_result=self.identity_result()); self.app.browser = browser
         self.app.tree.selection_set('0'); self.app.revoke_selected_once(); self.pump()
         permit = browser.calls[1][1]['permit']
-        permit.ready.set(); self.pump()
+        ready_with_inventory(self.app, permit); self.pump()
         self.assertTrue(permit.allowed)
         self.app.stop()
         browser.futures[0].set_result({'absent': True}); self.pump(); self.pump()
@@ -1345,7 +1352,7 @@ class WorkflowTests(unittest.TestCase):
         browser = ControlledBrowser(identity_result=self.identity_result()); self.app.browser = browser
         self.app.tree.selection_set('0'); self.app.revoke_selected_once(); self.pump()
         permit = browser.calls[1][1]['permit']
-        permit.ready.set(); self.pump()
+        ready_with_inventory(self.app, permit); self.pump()
         self.assertTrue(permit.allowed)
         browser.futures[0].set_result({'absent': True}); self.pump()
         self.assertEqual(self.store.latest_action('test-key-a'), 'absent_verified')
@@ -1358,7 +1365,7 @@ class WorkflowTests(unittest.TestCase):
         self.app.browser = browser
         self.app.tree.selection_set('0'); self.app.revoke_selected_once(); self.pump()
         permit = browser.calls[1][1]['permit']
-        permit.ready.set(); self.pump()
+        ready_with_inventory(self.app, permit); self.pump()
         self.assertTrue(permit.allowed)
         self.app.interrupt_operation(); self.pump()
         self.assertEqual(self.store.latest_action('test-key-a'), 'unknown_result')
@@ -1392,7 +1399,7 @@ class WorkflowTests(unittest.TestCase):
         browser = ControlledBrowser(identity_result=self.identity_result()); self.app.browser = browser
         self.app.tree.selection_set('0'); self.app.revoke_selected_once(); self.pump()
         permit = browser.calls[1][1]['permit']
-        permit.ready.set(); self.pump()
+        ready_with_inventory(self.app, permit); self.pump()
         browser.futures[0].set_result({'absent': False}); self.pump()
         self.assertEqual(self.store.latest_action('test-key-a'), 'unknown_result')
         self.assertIn('结果未知', self.app.buttons['revoke'].cget('text'))
@@ -1409,7 +1416,7 @@ class WorkflowTests(unittest.TestCase):
         browser = ControlledBrowser(identity_result=self.identity_result()); self.app.browser = browser
         self.app.tree.selection_set('0'); self.app.revoke_selected_once(); self.pump()
         permit = browser.calls[1][1]['permit']
-        permit.ready.set(); self.pump()
+        ready_with_inventory(self.app, permit); self.pump()
         self.assertTrue(permit.allowed)
         self.app.login(); self.pump()
         self.assertEqual([a for a, _ in browser.calls], ['read_keys', 'revoke'])

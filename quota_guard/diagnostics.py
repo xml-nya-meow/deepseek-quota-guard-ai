@@ -140,7 +140,11 @@ def read_recent_diagnostics(folder, *, max_records=PREVIEW_MAX_RECORDS,
                 # The first fragment may be only the tail of a JSON record.
                 raw = raw.partition(b'\n')[2]
             lines = raw.splitlines()
-            for line in lines:
+            # Scan each file newest-first so the stable timestamp sort below
+            # preserves append order when Windows gives events the same tick.
+            # Otherwise a tail limit could keep the older event and the case
+            # selector could show it ahead of the latest failure.
+            for line in reversed(lines):
                 if not line.strip():
                     continue
                 try:

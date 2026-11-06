@@ -283,7 +283,7 @@ def _browser_worker(connection):
                             active_action = None
                             continue
                     if action == 'revoke':
-                        permit = DeletePermit()
+                        permit = DeletePermit(target_tracking_id=kwargs['tracking_id'])
                         kwargs['permit'] = permit
                     stage = _STAGES.get(action, '正在操作平台')
                     connection.send({'kind': 'progress', 'session': session,
@@ -304,7 +304,8 @@ def _browser_worker(connection):
             task, future = active
             if permit is not None and permit.ready.is_set() and not ready_sent:
                 ready_sent = True
-                connection.send({'kind': 'permit_ready', 'session': session, 'task': task})
+                connection.send({'kind': 'permit_ready', 'session': session, 'task': task,
+                                 'prepared_inventory': permit.prepared_inventory(kwargs['tracking_id'])})
             current = getattr(service, 'progress', None)
             if isinstance(current, dict) and isinstance(current.get('stage'), str) and current['stage'] != stage:
                 stage = current['stage']
@@ -900,6 +901,16 @@ class IsolatedBrowserService:
             self._log('browser_stage', stage=message['stage'][:100], action=task.action, task_id=task.number,
                       elapsed_ms=round((time.monotonic() - task.started) * 1000))
         elif kind == 'permit_ready' and task.permit is not None:
+            try:
+                inventory = message.get('prepared_inventory')
+                if (task.action != 'revoke' or not isinstance(inventory, dict)
+                        or set(inventory) != {'target_tracking_id', 'known_tracking_ids'}
+                        or inventory['target_tracking_id'] != task.kwargs['tracking_id']):
+                    raise GuardError('撤销准备与当前目标不一致。')
+                task.permit.set_prepared_inventory(inventory['target_tracking_id'], inventory['known_tracking_ids'])
+            except (KeyError, TypeError, GuardError):
+                self._abort('撤销准备证据未通过核验，未授权提交')
+                return
             task.permit_ready = True
             task.permit.ready.set()
         elif kind == 'result':

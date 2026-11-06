@@ -128,7 +128,7 @@ class SparseManagedRowsTests(unittest.TestCase):
         self.assertEqual(self.store.latest_action(IDS['c']), 'pending')
         self.assertFalse(args['permit'].allowed)
 
-        args['permit'].ready.set()
+        workflow.ready_with_inventory(self.app, args['permit'])
         self.pump()
         self.assertTrue(args['permit'].allowed)
         self.assertEqual(self.store.latest_action(IDS['c']), 'requested')

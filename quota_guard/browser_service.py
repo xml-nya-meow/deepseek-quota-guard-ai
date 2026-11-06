@@ -754,6 +754,7 @@ class BrowserService:
         """
         with self._prepared_http_target(name, tracking_id) as (manager, prepared, expected):
             self._stage('等待账本核验和一次性撤销许可')
+            permit.set_prepared_inventory(tracking_id, expected)
             permit.ready.set()
             if not permit.decided.wait(20) or not permit.allowed:
                 return {'cancelled': True}

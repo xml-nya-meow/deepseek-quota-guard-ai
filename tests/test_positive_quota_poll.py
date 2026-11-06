@@ -61,7 +61,7 @@ class PositiveQuotaPollTests(unittest.TestCase):
         permit = args['permit']
         self.assertFalse(permit.allowed)
         self.assertEqual(self.store.latest_action('test-key-a'), 'pending')
-        permit.ready.set()
+        fixtures.ready_with_inventory(self.app, permit)
         self.pump()
         self.assertTrue(permit.allowed)
         self.assertEqual(self.store.latest_action('test-key-a'), 'requested')

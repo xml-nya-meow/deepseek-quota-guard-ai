@@ -84,7 +84,9 @@ def fixture_worker(connection):
                 connection.send({'kind': 'progress', 'session': 'expired-session',
                                  'task': task, 'stage': '过期进度不应显示'})
             if mode in ('permit', 'permit_hang'):
-                send('permit_ready')
+                send('permit_ready', prepared_inventory={
+                    'target_tracking_id': args['tracking_id'],
+                    'known_tracking_ids': [args['tracking_id'], 'synthetic-control']})
                 decision = connection.recv()
                 if (decision.get('kind'), decision.get('session'), decision.get('task')) != (
                         'permit_decision', session, task):

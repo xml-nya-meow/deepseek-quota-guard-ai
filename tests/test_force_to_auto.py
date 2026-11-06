@@ -27,7 +27,7 @@ class ForceToAutoTests(unittest.TestCase):
         self.pump()
         self.assertEqual([action for action, _ in browser.calls], ['read_keys', 'revoke'])
         permit = browser.calls[-1][1]['permit']
-        permit.ready.set()
+        fixtures.ready_with_inventory(self.app, permit)
         self.pump()
         self.assertTrue(permit.allowed)
         browser.futures[0].set_result({'absent': True} if result is None else result)
@@ -94,7 +94,7 @@ class ForceToAutoTests(unittest.TestCase):
         self.assertEqual(browser.calls[-1][0], 'revoke')
         self.assertEqual(browser.calls[-1][1]['tracking_id'], 'test-key-b')
         permit = browser.calls[-1][1]['permit']
-        permit.ready.set()
+        fixtures.ready_with_inventory(self.app, permit)
         self.pump()
         self.assertTrue(permit.allowed)
         evidence = self.store.latest_action_record('test-key-b')

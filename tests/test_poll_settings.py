@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from quota_guard.preferences import (DEFAULT_POLL_INTERVAL_SECONDS, PREFERENCES_FILENAME,
                                      load_poll_interval, save_poll_interval, validate_poll_interval)
 from quota_guard.ui import App, COLLECTION_MAX_AGE_SECONDS, TZ, collection_is_fresh
+from quota_guard.scheduler import CandidateQueue
 
 
 class Value:
@@ -105,6 +106,8 @@ class PollSchedulingTests(unittest.TestCase):
         app.poll_feedback_var = Value()
         app.status_var = Value()
         app.management_generation = 1
+        app.candidate_queue = CandidateQueue()
+        app.queue_summary_var = Value()
         app.automatic = app.observing = True
         app.busy = app.closing = app.recovery_mode = app.interrupting = False
         app.cleanup_failed = app.audit_failed = app.pending_login = False

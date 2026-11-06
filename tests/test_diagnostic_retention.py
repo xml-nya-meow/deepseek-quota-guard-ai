@@ -180,6 +180,18 @@ class DiagnosticPreviewTests(unittest.TestCase):
             self.assertLess(preview.text.index('event_50 '), preview.text.index('event_349 '))
             self.assertLessEqual(len(preview.text.encode('utf-8')), PREVIEW_MAX_BYTES)
 
+    def test_identical_timestamps_keep_latest_appended_rows_under_tail_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = [self.row(n, count=n) for n in range(3)]
+            for row in rows:
+                row['time'] = rows[0]['time']
+            self.write_rows(tmp, rows)
+            preview = read_recent_diagnostics(tmp, max_records=2)
+            self.assertEqual(preview.record_count, 2)
+            self.assertTrue(preview.truncated)
+            self.assertNotIn('event_0 ', preview.text)
+            self.assertLess(preview.text.index('event_1 '), preview.text.index('event_2 '))
+
     def test_preview_read_and_output_are_byte_bounded(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = self.write_rows(tmp, [self.row(n, message='中' * 200) for n in range(1000)])

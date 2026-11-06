@@ -425,6 +425,65 @@ class DataStore:
         """Return identities not yet retired, without assuming they still exist."""
         return {row["tracking_id"] for row in self.active_bindings(require_workbook=require_workbook)}
 
+    def binding_scopes(self) -> dict[str, tuple[tuple[str, bool], ...]]:
+        """One read of complete per-person binding scopes, including retired IDs.
+
+        This metadata supports observation provenance only. It does not imply
+        current platform presence, available fees, or permission to act.
+        """
+        self.load(require_workbook=False)
+        scopes = {}
+        with self._connect() as db:
+            for person, key, active in db.execute(
+                    'SELECT person,tracking_id,active FROM bindings ORDER BY person,tracking_id'):
+                scopes.setdefault(person, []).append((key, bool(active)))
+        return {person: tuple(bindings) for person, bindings in scopes.items()}
+
+    @staticmethod
+    def _operation_recovery_evidence(operation: list[dict], *, tracking_id: str, account_id: str):
+        """Recover one immutable context, never merge inventories across operations."""
+        from .recovery_evidence import validate_recovery_evidence
+        found = None
+        for event in operation:
+            if 'recovery_evidence' not in event:
+                continue
+            context = validate_recovery_evidence(event['recovery_evidence'],
+                target_tracking_id=tracking_id, account_id=account_id)
+            if found is not None and context != found:
+                raise GuardError('同一操作的恢复证据发生冲突，不能继续核实。')
+            if event.get('read_only') is True or event.get('status') == 'pending':
+                raise GuardError('恢复证据不属于原撤销操作的已核验准备结果。')
+            found = context
+        return found
+
+    def recovery_tracking_ids(self, tracking_id: str, operation_id: str | None) -> set[str]:
+        """Expected original identities for reconciliation, not current presence.
+
+        Old operations retain their existing active-binding fallback. A malformed
+        stored context is an error rather than a reason to silently use that fallback.
+        Explicit operation IDs must exist for this exact target.
+        """
+        config = self.load(require_workbook=False)
+        key_id = _identifier(tracking_id)
+        if operation_id is not None:
+            operation_id = _identifier(operation_id)
+            if not re.fullmatch(r'[A-Za-z0-9_-]{1,200}', operation_id):
+                raise GuardError('操作编号无效。')
+        with self._connect() as db:
+            history = self._action_history(db)
+            if operation_id is not None and any(event.get('operation_id') == operation_id
+                    and event.get('tracking_id') != key_id for event in history):
+                raise GuardError('操作编号已关联其他目标，不能借用其恢复证据。')
+            operation = self._operation_history(history,
+                {'tracking_id': key_id, 'operation_id': operation_id})
+            if operation_id is not None and not operation:
+                raise GuardError('没有找到原操作，不能取得恢复证据。')
+            context = self._operation_recovery_evidence(operation,
+                tracking_id=key_id, account_id=config.account_id)
+            if context is not None:
+                return set(context['known_tracking_ids'])
+            return {key for (key,) in db.execute('SELECT tracking_id FROM bindings WHERE active=1')}
+
     def latest_action(self, tracking_id: str) -> str | None:
         """Latest persisted action status, across the complete event history."""
         record = self.latest_action_record(tracking_id)
@@ -466,7 +525,8 @@ class DataStore:
         Recognize the exact old UI-authored intent for existing ledgers, without
         treating arbitrary detail text or missing submission events as evidence.
         """
-        if not history or any('evidence' in event or event.get('requires_reconciliation') is True
+        if not history or any('evidence' in event or 'recovery_evidence' in event
+                              or event.get('requires_reconciliation') is True
                               or event['status'] in {'prepared', 'requested', 'confirmed', 'not_submitted'}
                               for event in history):
             return False
@@ -633,6 +693,10 @@ class DataStore:
                                 action = {field: value for field, value in event.items()
                                           if field not in {'id', 'created', 'kind'}}
                             operation = self._operation_history(history, action)
+                            recovery = self._operation_recovery_evidence(operation,
+                                tracking_id=key, account_id=config.account_id)
+                            if recovery is not None:
+                                action['recovery_evidence'] = recovery
                             if self._read_only_operation(operation):
                                 action['read_only'] = True
                             elif action['status'] == 'present_verified':
@@ -1044,12 +1108,12 @@ class DataStore:
     def record_action(self, name: str, tracking_id: str, status: str, detail: str, *,
                       operation_id: str | None = None, evidence: dict | None = None,
                       continuation: bool = False, read_only: bool = False,
-                      intent: str | None = None):
+                      intent: str | None = None, recovery_evidence: dict | None = None):
         # Only the outcome of an existing operation can bypass the workbook.
         # New intents/approval and new evidence always require a valid table.
-        self.load(require_workbook=not continuation)
+        config = self.load(require_workbook=not continuation)
         if continuation:
-            if status in {"pending", "requested"} or evidence is not None:
+            if status in {"pending", "requested"} or evidence is not None or recovery_evidence is not None:
                 raise GuardError("恢复只允许记录原操作结果，不能建立新撤销意图、许可或费用依据。")
         else:
             self.read_people()
@@ -1068,6 +1132,9 @@ class DataStore:
             raise GuardError("未提交结论只允许延续有编号的新准备操作。")
         if status == 'observation_failed' and not continuation:
             raise GuardError("只读观察失败只能续记已有待核实操作。")
+        if recovery_evidence is not None and (status != 'requested' or continuation
+                or read_only or operation_id is None):
+            raise GuardError('恢复证据只允许随原操作首次提交意图一起保存。')
         if operation_id is not None:
             operation_id = _identifier(operation_id)
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", operation_id):
@@ -1086,6 +1153,21 @@ class DataStore:
                 raise GuardError("操作目标与既有绑定不一致，拒绝记录成功。")
             history = self._action_history(db)
             operation = self._operation_history(history, payload)
+            original_recovery = self._operation_recovery_evidence(operation,
+                tracking_id=key_id, account_id=config.account_id)
+            if status == 'requested' and original_recovery is not None:
+                raise GuardError('原操作已保存提交意图，不能重复取得提交责任。')
+            if recovery_evidence is not None:
+                # Do not backfill an already possibly sent operation, even with
+                # identical-looking data obtained from a later observation.
+                if (not operation or any(event['status'] != 'pending' for event in operation)
+                        or self._read_only_operation(operation) or original_recovery is not None):
+                    raise GuardError('已有提交或观察记录不能补造、替换恢复证据。')
+                from .recovery_evidence import validate_recovery_evidence
+                payload['recovery_evidence'] = validate_recovery_evidence(recovery_evidence,
+                    target_tracking_id=key_id, account_id=config.account_id)
+            elif original_recovery is not None:
+                payload['recovery_evidence'] = original_recovery
             if intent is not None:
                 if operation:
                     raise GuardError("已有操作不能追加或改写为强制删除意图。")

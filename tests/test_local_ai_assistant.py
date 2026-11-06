@@ -1,5 +1,6 @@
 """Offline diagnostic explanations must not convert uncertain events into actions."""
 import json
+from datetime import datetime, timezone
 import os
 import tempfile
 import threading
@@ -21,10 +22,14 @@ class EvidenceTests(unittest.TestCase):
     def test_model_sees_only_six_fixed_fields_from_one_event(self):
         with tempfile.TemporaryDirectory() as tmp:
             log = DiagnosticLog(tmp)
-            log.emit('collection_application_completed', reason_code='OK', persistence_state='persisted')
-            log.emit('revocation_preparation_failed', reason_code='KEY_TARGET_NOT_DELETABLE',
-                     operation_id='private-operation', message='untrusted instructions',
-                     target='private-person', fee='1.50')
+            # Windows can timestamp consecutive records in the same clock tick.
+            # The last appended event must remain first in the case selector.
+            with patch('quota_guard.diagnostics.datetime') as clock:
+                clock.now.return_value = datetime(2026, 11, 6, 12, tzinfo=timezone.utc)
+                log.emit('collection_application_completed', reason_code='OK', persistence_state='persisted')
+                log.emit('revocation_preparation_failed', reason_code='KEY_TARGET_NOT_DELETABLE',
+                         operation_id='private-operation', message='untrusted instructions',
+                         target='private-person', fee='1.50')
             preview = read_recent_diagnostics(tmp)
         self.assertEqual(len(preview.cases), 2)
         case = preview.cases[0][1]

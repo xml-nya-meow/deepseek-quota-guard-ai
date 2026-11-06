@@ -61,7 +61,7 @@ class FeeFailureEligibilityTests(unittest.TestCase):
         self.app.tree.selection_set('0'); self.app.revoke_selected_once(); self.pump()
         self.assertEqual([action for action, _ in browser.calls], ['read_keys', 'revoke'])
         permit = browser.calls[1][1]['permit']
-        permit.ready.set(); self.pump()
+        fixtures.ready_with_inventory(self.app, permit); self.pump()
         self.assertTrue(permit.allowed)
         event = self.store.latest_action_record('test-key-a')
         self.assertEqual(event['status'], 'requested')
@@ -100,7 +100,7 @@ class FeeFailureEligibilityTests(unittest.TestCase):
         self.app.browser = browser
         self.app.tree.selection_set('0'); self.app.revoke_selected_once(); self.pump()
         permit = browser.calls[1][1]['permit']
-        permit.ready.set(); self.pump()
+        fixtures.ready_with_inventory(self.app, permit); self.pump()
         self.assertTrue(permit.allowed)
         self.assertEqual(self.store.latest_action_record('test-key-a')['intent'], 'manual_force')
         self.assertFalse(self.app.collection_has_fees)

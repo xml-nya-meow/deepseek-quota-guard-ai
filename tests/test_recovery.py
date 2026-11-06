@@ -416,6 +416,7 @@ class RecoveryGuiTests(_LedgerFixture, unittest.TestCase):
         self.app._process_next()
         self.assertEqual(browser.calls[0][0], "revoke")
         permit = browser.calls[0][1]["permit"]
+        permit.set_prepared_inventory(self.target, [key['tracking_id'] for key in self.keys])
         permit.ready.set()
         self.wait_for(lambda: self.store.latest_action(self.target) == "requested")
         self.assertTrue(permit.allowed)

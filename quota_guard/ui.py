@@ -34,6 +34,7 @@ from .text_prompt import ask_text
 from .appearance import (THEME_MODES, load_theme_mode, save_theme_mode,
                          resolve_theme, apply_theme)
 from .window_layout import ScrollableContent, fit_window
+from .scheduler import CandidateQueue
 
 TZ = timezone(timedelta(hours=8))
 POLL_MS = DEFAULT_POLL_INTERVAL_SECONDS * 1000
@@ -191,6 +192,7 @@ class App:
         self.cleanup_failed = False
         self.audit_failed = False
         self.audit_pending = []
+        self.candidate_queue = CandidateQueue()
         self.account_mismatch = None
         self.current_action = None
         self.interrupt_future = None
@@ -343,6 +345,12 @@ class App:
         self.collection_summary_var = tk.StringVar(value="费用核验：尚未读取。")
         self.main_content.wrap(ttk.Label(outer, textvariable=self.collection_summary_var,
                                         wraplength=1040)).pack(anchor="w", pady=(0, 8))
+        self.queue_summary_var = tk.StringVar(value='候选队列尚未运行。')
+        self.main_content.wrap(ttk.Label(outer, textvariable=self.queue_summary_var,
+                                        wraplength=1040)).pack(anchor='w', pady=(0, 4))
+        self.forecast_summary_var = tk.StringVar(value='预测记录尚未读取费用。')
+        self.main_content.wrap(ttk.Label(outer, textvariable=self.forecast_summary_var,
+                                        style='Muted.TLabel', wraplength=1040)).pack(anchor='w', pady=(0, 8))
         tabs = ttk.Notebook(outer)
         tabs.pack(fill="both", expand=True)
         overview = ttk.Frame(tabs, padding=8)
@@ -542,7 +550,7 @@ class App:
             self.collect()
         self.timer = self.root.after(delay_ms, read_next)
 
-    def _claim_targets(self, keys=()):
+    def _claim_targets(self, keys=(), *, recovery_ids=()):
         """Keep verified identities reserved until this window safely closes.
 
         Reserve the whole observed list, not merely the chosen workbook subset.
@@ -550,8 +558,14 @@ class App:
         """
         from .target_lock import TargetLock
         targets = {row['tracking_id'] for row in keys}
+        targets.update(recovery_ids)
         targets.update(self.store.active_tracking_ids(require_workbook=False))
-        targets.update(action['tracking_id'] for action in self.store.unresolved_actions())
+        for action in self.store.unresolved_actions():
+            targets.add(action['tracking_id'])
+            # Restarted windows must also reserve the original independent
+            # controls, including ones never bound to a workbook person.
+            targets.update(self.store.recovery_tracking_ids(
+                action['tracking_id'], action.get('operation_id')))
         if self.target_lock is None:
             # Retain the cleanup owner before the first resource acquisition:
             # even a failed initial batch plus failed rollback can be closed.
@@ -792,6 +806,9 @@ class App:
         self.config = None
         self.recovery_mode = False
         self.validated_hash = None
+        self.candidate_queue.reset()
+        self.queue_summary_var.set('候选队列尚未运行。')
+        self.forecast_summary_var.set('当前账本的预测记录尚未读取费用。')
         self.action_states.clear()
         self._invalidate_collection(session=True)
         self.path_var.set(f"数据文件夹：{self.folder}")
@@ -1554,6 +1571,28 @@ class App:
             self._show_collection_summary(f'费用核验：{period}{self.action_states.get("collect", "未完成")}。'
                                           '本次未取得可用于自动处理的新费用依据。')
 
+    def _record_forecast_shadow(self, result):
+        """Optional, bounded observations; never a quota or scheduling input."""
+        try:
+            from .forecast_shadow import record_collection
+            context = self._collection_context()
+            bindings = self.store.binding_scopes()
+            rows = [{**row, 'binding_scope': json.dumps(bindings.get(row.get('name'), ()),
+                                                       ensure_ascii=True)} for row in self.rows]
+            # Session generations and reread clocks are not evidence versions.
+            scope = json.dumps(context[1:], default=str, ensure_ascii=True)
+            summary = record_collection(self.folder, scope=scope, rows=rows,
+                                        source_id=result['source_id'], collected_at=time.time())
+            # The console contract currently supplies a requested date range,
+            # not a certified data-as-of time. Do not invent an ETA from it.
+            self.forecast_summary_var.set(
+                f"预测影子记录已更新 {summary['count']} 项。当前来源尚无可信数据截止时间，"
+                '不提供到线时间估计；删除资格与读取周期沿用原规则。')
+            self._diagnostic('forecast_shadow_recorded', count=summary['count'])
+        except Exception:
+            self.forecast_summary_var.set('预测影子记录暂不可用；费用与自动管理继续按原规则处理。')
+            self._diagnostic('forecast_shadow_unavailable')
+
     def collect(self, *, after_read=None):
         if self.recovery_mode or self.busy or not self.config or self.pending_login or self.pending_change is not None or self.closing or self.interrupting or self.cleanup_failed or self.audit_failed:
             return
@@ -1696,6 +1735,7 @@ class App:
                 f"未覆盖 {coverage.get('active_missing_count', 0)} 枚。未覆盖费用保留未知或历史下界。")
             self._collection_trace('collection_application_completed', operation_id, 'collection_publication',
                                    persistence_state='persisted', application=application)
+            self._record_forecast_shadow(result)
             now = datetime.now(TZ).strftime("%H:%M:%S")
             reached = sum(row.get("status") == "triggered" for row in self.rows)
             unknown = sum(row.get('status') == 'unknown' for row in self.rows)
@@ -1846,6 +1886,8 @@ class App:
         self.automatic = False
         self.single_revoke_id = None
         self.management_generation += 1
+        self.candidate_queue.reset()
+        self.queue_summary_var.set('候选队列已停止。已有操作仍按原记录核实。')
         if was_running or not quiet:
             self.action_states["start"] = "已停止"
         if self.delete_permit is not None:
@@ -1944,17 +1986,26 @@ class App:
             raise ValueError('表格已变化，自动管理暂停，请检查后重新启动。')
         if not self._collection_is_current():
             self._invalidate_collection()
+            self.queue_summary_var.set('候选队列等待新鲜证据，已记录的本次等待时间保留。')
             self.status_var.set('读取已过期或跨日，正在重新核验身份与费用；不会沿用旧许可。')
             self.collect()
             return
         self.refresh_rows()
         if self.store.unresolved_actions():
             self.stop(quiet=True)
+            self.queue_summary_var.set('候选队列已阻塞，须先核实原操作结果。')
             self.status_var.set('有上次操作待核实，请先选中对应人员并点击“核实平台状态”。')
             return
         targets = [row for row in self.rows if eligible_for_automatic_action(row)]
         if not self.collection_has_fees:
             targets = [row for row in targets if Decimal(str(row['amount'])) == 0 or Decimal(str(row['share'])) == 0]
+        stamp = time.monotonic()
+        scope = (self.management_generation, *self._collection_context())
+        self.candidate_queue.sync(targets, scope=scope, now=stamp)
+        queue_state = self.candidate_queue.summary(now=stamp)
+        self.queue_summary_var.set(
+            f"待处理 {queue_state['count']} 枚，最长等待 {queue_state['oldest_wait_seconds']:.1f} 秒。"
+            '当前按确认批次与稳定身份处理，预测记录不改变删除资格。')
         if not targets:
             if self.retry_collection:
                 self._schedule_collection_poll()
@@ -1966,7 +2017,10 @@ class App:
                 self.stop(quiet=True)
                 self.status_var.set('费用未通过核验，且当前没有可自动处理的目标；全自动管理已停止。请查看读取状态与诊断记录。')
             return
-        self._execute_revoke(targets[0])
+        selected = self.candidate_queue.select(now=stamp)
+        if selected is not None:
+            self._diagnostic('candidate_selected', count=queue_state['count'])
+            self._execute_revoke(selected)
 
     def _current_revoke_target(self, row, *, forced=False):
         """Force uses verified identity; automatic management also needs quota evidence."""
@@ -2112,7 +2166,7 @@ class App:
             self.status_var.set(f"{row['name']} 上次操作尚未核实。请选中该人员，点击“核实平台状态”，再决定是否重新启动。")
             return
         from .browser_service import DeletePermit
-        permit = DeletePermit()
+        permit = DeletePermit(target_tracking_id=row['tracking_id'])
         self.delete_permit = permit
         checked_hash = self.validated_hash
         checked_session = self.session_generation
@@ -2130,9 +2184,10 @@ class App:
             if single and self.single_revoke_id == operation_id:
                 self.single_revoke_id = None
 
-        def record(status, detail, *, evidence=None):
+        def record(status, detail, *, evidence=None, recovery_evidence=None):
             operation_store.record_action(row['name'], row['tracking_id'], status, detail,
                                           operation_id=operation_id, evidence=evidence,
+                                          recovery_evidence=recovery_evidence,
                                           intent='manual_force' if forced and status == 'pending' else None,
                                           continuation=status not in {'pending', 'requested'})
             if status == 'unknown_result':
@@ -2168,8 +2223,12 @@ class App:
                         or Decimal(evidence['amount']) == 0 or Decimal(evidence['share']) == 0)))):
                 permit.decide(False)
                 return
+            inventory = permit.prepared_inventory(row['tracking_id'])
+            recovery_evidence = {'schema': 1, 'account_id': evidence['account_id'],
+                                 **inventory, 'source': 'prepared_http_inventory_v1'}
             record('requested', ('所选目标与强制删除意图已复核，未要求达到额度；' if forced else '目标与额度已复核，') +
-                   '控制台 HTTP 提交许可可能已发出；最终结果仍待平台核实', evidence=evidence)
+                   '控制台 HTTP 提交许可可能已发出；最终结果仍待平台核实',
+                   evidence=evidence, recovery_evidence=recovery_evidence)
             if not context_valid():
                 permit.decide(False)
                 return
@@ -2311,8 +2370,9 @@ class App:
             if self.recovery_mode and not any(action['tracking_id'] == row['tracking_id']
                                              for action in operation_store.unresolved_actions()):
                 raise GuardError('恢复模式只核实账本中已有的待核实操作。')
-            self._claim_targets(self.last_keys)
-            known_keys = operation_store.active_tracking_ids(require_workbook=False)
+            known_keys = operation_store.recovery_tracking_ids(
+                row['tracking_id'], previous.get('operation_id') if previous else None)
+            self._claim_targets(self.last_keys, recovery_ids=known_keys)
         except GuardError as exc:
             self.error('未开始核实', exc, dialog=False)
             return

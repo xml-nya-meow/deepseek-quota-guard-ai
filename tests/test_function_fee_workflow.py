@@ -76,7 +76,7 @@ class FunctionFeeWorkflowTests(unittest.TestCase):
 
             def worker():
                 try:
-                    permit.ready.set()
+                    fixtures.ready_with_inventory(self.app, permit)
                     if not permit.decided.wait(3):
                         raise RuntimeError('Synthetic worker received no decision')
                     record = self.store.latest_action_record('test-key-a')

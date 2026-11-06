@@ -7,6 +7,7 @@ legacy atomic check/click exercised only by compatibility tests).
 from __future__ import annotations
 
 import math
+import re
 from threading import Event, Lock
 import time
 import uuid
@@ -131,7 +132,7 @@ expiry. Code must use ``consume_for_click`` rather than treat that flag as a
 current authorization. This preserves the audit obligation after approval.
 The historical method name also gates the native HTTP submission.
 """
-    def __init__(self, *, ttl_seconds=MAX_GRANT_SECONDS):
+    def __init__(self, *, ttl_seconds=MAX_GRANT_SECONDS, target_tracking_id=None):
         if (isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, (int, float))
                 or not math.isfinite(ttl_seconds) or not 0 < ttl_seconds <= MAX_GRANT_SECONDS):
             raise ValueError('撤销许可期限必须大于零且不超过五秒。')
@@ -143,6 +144,42 @@ The historical method name also gates the native HTTP submission.
         self._grant = None
         self._exported = False
         self._consumed = False
+        self._prepared_inventory = None
+        self._target_tracking_id = target_tracking_id
+
+    @property
+    def target_tracking_id(self):
+        return self._target_tracking_id
+
+    def set_prepared_inventory(self, target_tracking_id, known_tracking_ids):
+        """Carry bounded public identity evidence, never an approval or credential.
+
+        The browser sets this only after HTTP/DOM preparation; IPC validates it
+        again before exposing readiness. Once set it cannot change target/set.
+        """
+        def valid(value):
+            return (isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_-]{8,200}', value)
+                    and not value.lower().startswith('sk-'))
+        if (not valid(target_tracking_id)
+                or self.target_tracking_id is not None and self.target_tracking_id != target_tracking_id
+                or not isinstance(known_tracking_ids, (list, tuple, set, frozenset))
+                or not 2 <= len(known_tracking_ids) <= 200
+                or any(not valid(key) for key in known_tracking_ids)
+                or len(set(known_tracking_ids)) != len(known_tracking_ids)
+                or target_tracking_id not in known_tracking_ids):
+            raise GuardError('撤销准备的身份对照证据无效，未授权提交。')
+        value = (target_tracking_id, tuple(sorted(known_tracking_ids)))
+        with self._lock:
+            if self._prepared_inventory is not None and self._prepared_inventory != value:
+                raise GuardError('同一撤销准备的对照证据发生变化，未授权提交。')
+            self._prepared_inventory = value
+
+    def prepared_inventory(self, target_tracking_id):
+        with self._lock:
+            value = self._prepared_inventory
+            if value is None or value[0] != target_tracking_id:
+                raise GuardError('缺少本次目标已核验的恢复对照证据，未授权提交。')
+            return {'target_tracking_id': value[0], 'known_tracking_ids': list(value[1])}
 
     @property
     def allowed(self):
