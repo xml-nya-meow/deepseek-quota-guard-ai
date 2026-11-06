@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from quota_guard.core import DataStore, GuardError, Person, TZ
 from quota_guard import membership_recovery as membership
+from quota_guard.responsibility_registry import RegistryError
 
 
 TEMP_ROOT = Path(__file__).resolve().parents[2] / 'test-temp'
@@ -188,8 +189,9 @@ class MembershipRecoveryTests(unittest.TestCase):
     def test_export_failure_keeps_target_and_exact_audit_for_bounded_resume(self):
         plan = self.plan()
         with patch.object(DataStore, 'export_logs', side_effect=OSError('synthetic export failure')):
-            with self.assertRaises(OSError):
+            with self.assertRaises(RegistryError) as raised:
                 membership.apply(plan)
+        self.assertEqual(raised.exception.reason_code, 'REGISTRY_MEMBER_EXPORT_FAILED')
         first = DataStore(plan['members'][0]['path'])
         audit = self.audits(first)
         self.assertEqual(len(audit), 1)

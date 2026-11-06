@@ -245,7 +245,15 @@ def _apply_member(plan, member):
             _check_member(plan, member, store, db, require_target=True)
     # A committed witness survives an export failure. Replaying this same step
     # verifies its exact audit and retries export; it never duplicates the event.
-    store.export_logs()
+    try:
+        store.export_logs()
+    except RegistryError:
+        raise
+    except (GuardError, OSError):
+        # export_logs translates filesystem errors to GuardError (ValueError).
+        # Preserve the local failure boundary instead of letting the registry
+        # transaction misreport it as damage to the shared SQLite/anchor pair.
+        raise RegistryError('REGISTRY_MEMBER_EXPORT_FAILED') from None
     return state == 'before'
 
 

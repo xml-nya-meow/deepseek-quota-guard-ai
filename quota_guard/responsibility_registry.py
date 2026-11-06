@@ -39,6 +39,11 @@ _ERRORS = {
     'REGISTRY_UPGRADE_REQUIRED': '共享责任登记需要显式升级恢复协议；升级前保持只读，不会重建登记。',
     'REGISTRY_PLAN_REQUIRED': '成员迁移缺少完整持久计划；保持阻断，不能凭成员编号或旧步骤完成迁移。',
     'REGISTRY_PLAN_STALE': '成员迁移计划已过期或与当前登记不一致；未写入任何成员见证。',
+    'REGISTRY_MEMBER_PRECHECK_FAILED': '建立成员计划前的本地预检失败；本次计划尚未保存，范围建立可能尚未完成。请修复本地账本问题并保留现有登记文件，保持停止新写入。',
+    'REGISTRY_MEMBER_READ_FAILED': '成员恢复的本地预检失败；原迁移计划保留，尚未完成恢复。请修复本地账本读取问题后重试原计划，当前不允许新写入。',
+    'REGISTRY_MEMBER_APPLY_FAILED': '成员恢复的本地写入失败；原迁移计划保留，部分成员可能已写入见证。请修复本地账本问题后重试原计划，当前不允许新写入。',
+    'REGISTRY_MEMBER_VERIFY_FAILED': '成员恢复的本地复核失败；原迁移计划保留，尚未完成恢复。请修复本地账本问题后重试原计划，当前不允许新写入。',
+    'REGISTRY_MEMBER_EXPORT_FAILED': '成员恢复见证已保存，但本地日志导出失败；原迁移计划保留，尚未完成恢复。请恢复日志写入条件后重试原计划，当前不允许新写入。',
 }
 
 
@@ -46,6 +51,22 @@ class RegistryError(GuardError):
     def __init__(self, reason_code='REGISTRY_INVALID'):
         self.reason_code = reason_code if reason_code in _ERRORS else 'REGISTRY_INVALID'
         super().__init__(_ERRORS[self.reason_code])
+
+
+def _membership_callback(callback, plan, reason_code):
+    """Classify only local callback failures, never registry validation/commit.
+
+    A callback gets a detached, validated plan. Known evidence/identity errors
+    retain their precise code; incidental local failures get a fixed message
+    without including exception text, paths, account data or credentials.
+    """
+    detached = validate_membership_plan(plan)
+    try:
+        return callback(detached)
+    except RegistryError:
+        raise
+    except (OSError, sqlite3.Error, ValueError, KeyError, IndexError, TypeError, OverflowError):
+        raise RegistryError(reason_code) from None
 
 
 @dataclass(frozen=True)
@@ -344,7 +365,7 @@ class ResponsibilityRegistry:
                            (SCHEMA, epoch, 0, 0, 'initializing', json.dumps(sorted(expected_ledger_ids))))
                 if plan is not None:
                     if before_plan is not None:
-                        before_plan(validate_membership_plan(plan))
+                        _membership_callback(before_plan, plan, 'REGISTRY_MEMBER_PRECHECK_FAILED')
                     db.execute("INSERT INTO membership_plan VALUES(1,?,'pending',?)",
                                (plan['plan_id'], json.dumps(plan)))
                 db.execute(f'PRAGMA user_version={SCHEMA}')
@@ -600,7 +621,7 @@ class ResponsibilityRegistry:
                 if os.path.normcase(_path(member['path'])) != os.path.normcase(member['path']):
                     raise RegistryError('REGISTRY_LEDGER_MISMATCH')
             if before_plan is not None:
-                before_plan(validate_membership_plan(plan))
+                _membership_callback(before_plan, plan, 'REGISTRY_MEMBER_PRECHECK_FAILED')
             db.execute("INSERT OR REPLACE INTO membership_plan VALUES(1,?,'pending',?)",
                        (plan['plan_id'], json.dumps(plan)))
             db.execute("UPDATE metadata SET phase='initializing',expected_ledgers=? WHERE singleton=1",
@@ -622,7 +643,7 @@ class ResponsibilityRegistry:
             # The plan was committed before this transaction. A failure rolls
             # back shared rows but not local target witnesses: a retry uses
             # this same plan and the same deterministic receipt generations.
-            preflight(validate_membership_plan(plan))
+            _membership_callback(preflight, plan, 'REGISTRY_MEMBER_READ_FAILED')
             before_ids = {m['ledger_id'] for m in plan['before_members']}
             for member in plan['members']:
                 if member['ledger_id'] not in before_ids:
@@ -639,8 +660,8 @@ class ResponsibilityRegistry:
                            (member['target_anchor']['checkpoint'], member['ledger_id']))
             db.execute('UPDATE metadata SET generation=? WHERE singleton=1',
                        (plan['base_generation'] + len(plan['operations']),))
-            apply(validate_membership_plan(plan))
-            verify(validate_membership_plan(plan))
+            _membership_callback(apply, plan, 'REGISTRY_MEMBER_APPLY_FAILED')
+            _membership_callback(verify, plan, 'REGISTRY_MEMBER_VERIFY_FAILED')
             db.execute("UPDATE membership_plan SET state='complete' WHERE singleton=1")
             db.execute("UPDATE metadata SET phase='ready' WHERE singleton=1")
             return True
