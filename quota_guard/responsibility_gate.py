@@ -6,6 +6,7 @@ discover every ledger on this computer. Credentials never enter the registry.
 """
 from hashlib import sha256
 import json
+from pathlib import Path
 
 from .core import DataStore, GuardError
 from .responsibility_registry import ResponsibilityRegistry, RegistryError, validate_receipt
@@ -212,10 +213,11 @@ class ResponsibilityGate:
             raise GuardError('共享范围仍有待核实操作，自动和强制删除均已暂停。请打开原账本并核实：'
                              + origin['ledger_path'] + '；操作 ' + origin['receipt']['operation_id'])
 
-    def claim(self, store, operation_id, tracking_id):
+    def claim(self, store, operation_id, tracking_id, *, allow_declared_recovery=True):
         self.check(store)
         return self.registry.claim(ledger_id(store), operation_id, target_hash(tracking_id),
-                                   expected_checkpoint=ledger_anchor(store)['checkpoint'])
+                                   expected_checkpoint=ledger_anchor(store)['checkpoint'],
+                                   allow_declared_recovery=allow_declared_recovery)
 
     def possible_send(self, store, receipt, *, write_requested, context_valid=lambda: True):
         receipt = validate_receipt(receipt)
@@ -239,7 +241,9 @@ class ResponsibilityGate:
                 or records[-1].get('responsibility') != receipt.to_dict()
                 or target_hash(records[-1]['tracking_id']) != receipt.target_hash):
             raise RegistryError('REGISTRY_RECEIPT_MISMATCH')
-        self.registry.mark_possible_send(receipt)
+        from .declared_recovery import mark_local_send_boundary
+        self.registry.mark_possible_send(receipt,
+            before_mark=lambda: mark_local_send_boundary(store, receipt))
         return True
 
     def settle(self, store, receipt):
@@ -262,24 +266,105 @@ class ResponsibilityGate:
             # Registry independently rejects this release if possible_send was
             # ever recorded, including a stop after permit handoff.
             resolution = 'not_submitted'
+            from .declared_recovery import SEND_PREFIX
+            with store._connect() as db:
+                if db.execute('SELECT 1 FROM meta WHERE key=?', (SEND_PREFIX + receipt.operation_id,)).fetchone():
+                    raise GuardError('原操作已有可能提交边界见证；不能以取消结论释放责任，请只读核实。')
         else:
             return False
         store.export_logs()
         return self.registry.release(receipt, resolution=resolution)
 
-    def reconcile(self, store):
-        """Finish an interrupted terminal->release, never replay a request."""
+    def _check_recovery_members(self, store, context):
+        """Only the original location may recover its exact predecessor gap."""
+        receipt = validate_receipt(context['receipt'])
+        members = self.registry.registered_ledgers()
+        roster = _roster_hash(members)
+        owner = next((m for m in members if m['ledger_id'] == receipt.ledger_id), None)
+        if (owner is None or ledger_id(store) != receipt.ledger_id
+                or Path(store.folder).resolve() != Path(owner['path']).resolve()):
+            raise RegistryError('REGISTRY_LEDGER_MISMATCH')
+        for member in members:
+            current = DataStore(member['path'])
+            anchor = ledger_anchor(current)
+            allowed = {member['checkpoint']}
+            if member['ledger_id'] == receipt.ledger_id:
+                if member['checkpoint'] != receipt.generation:
+                    raise RegistryError('REGISTRY_LEDGER_MISMATCH')
+                allowed.add(context['prior_checkpoint'])
+            if (ledger_id(current) != member['ledger_id'] or not anchor
+                    or anchor['epoch'] != receipt.epoch or anchor['roster_hash'] != roster
+                    or anchor['checkpoint'] not in allowed):
+                raise RegistryError('REGISTRY_LEDGER_MISMATCH')
+            # Check the canonical registered path independently of the local
+            # predecessor gap; recovery never moves ownership to a copy.
+            self.registry.check_ledger(member['ledger_id'], current.folder,
+                epoch=receipt.epoch, checkpoint=member['checkpoint'])
+
+    def recover_declared(self, store, receipt=None):
+        """Recover only a schema-2 pre-authorization claim; never send/retry.
+
+        Freeze keeps the original slot occupied. A local transaction seals the
+        old operation, then successful export precedes exact shared release.
+        A send-boundary witness forbids recovery even after a paired registry
+        rollback. Existing possible_send responsibilities remain read-only.
+        """
+        from .declared_recovery import check_local_recoverable, recover_local_declared
         identity = ledger_id(store)
+        requested = None if receipt is None else validate_receipt(receipt).to_dict()
+        recovered = 0
+        for obligation in self.registry.open_obligations():
+            current = validate_receipt(obligation['receipt'])
+            if current.ledger_id != identity or requested is not None and current.to_dict() != requested:
+                continue
+            if obligation['phase'] != 'declared' or obligation['origin'] != 'claim':
+                if requested is not None:
+                    raise RegistryError('REGISTRY_TRANSITION_REJECTED')
+                continue
+            context = self.registry.recovery_for(current)
+            self._check_recovery_members(store, context)
+            # The callback holds the same shared exclusive lock as promotion.
+            # It only reads this ledger; do not nest another registry call.
+            fence = self.registry.freeze_declared(current,
+                before_freeze=lambda proposed: check_local_recoverable(store, proposed))
+            recover_local_declared(store, fence)
+            # Export is a separate failure boundary. Recheck the original
+            # location and exact persisted audit before releasing its slot.
+            self._check_recovery_members(store, fence)
+            check_local_recoverable(store, fence)
+            self.registry.finish_declared_recovery(current, fence['recovery_id'])
+            recovered += 1
+        return recovered
+
+    def reconcile(self, store):
+        """Resume local recovery or a saved terminal, never a remote request."""
+        try:
+            self.registry.snapshot()
+        except RegistryError as exc:
+            if exc.reason_code != 'REGISTRY_UPGRADE_REQUIRED':
+                raise
+            # Explicit lifecycle entry, not constructor or a background reset.
+            # Old obligations keep unknown predecessor context and cannot use
+            # the new pre-authorization recovery shortcut.
+            self.registry.upgrade_v1()
+        identity = ledger_id(store)
+        recovered = 0
         for obligation in self.registry.open_obligations():
             receipt = validate_receipt(obligation['receipt'])
             if receipt.ledger_id == identity:
-                self.settle(store, receipt)
+                records = [a for a in action_history(store) if a.get('operation_id') == receipt.operation_id]
+                if (obligation['phase'] == 'declared' and obligation['origin'] == 'claim'
+                        and not (records and records[-1]['status'] == 'absent_verified')):
+                    recovered += self.recover_declared(store, receipt)
+                else:
+                    self.settle(store, receipt)
         # A newly created successor may contain the final historical record of
         # a registered source. Adopt that reference before fees/bindings reload.
         if ledger_anchor(store) is None and action_history(store):
             self._check_members()
             if self._trusted_successor(store, self.registry.registered_ledgers()):
                 self._enroll(store)
+        return recovered
 
     def settle_operation(self, store, operation_id):
         receipt = self.registry.receipt_for(ledger_id(store), operation_id)

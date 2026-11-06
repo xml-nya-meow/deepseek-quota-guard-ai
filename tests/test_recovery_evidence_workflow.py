@@ -215,7 +215,7 @@ class RecoveryEvidenceWorkflowTests(unittest.TestCase):
         self.assertEqual(self.store.unresolved_actions()[0]['operation_id'], operation)
         self.assertNotIn('recovery_evidence', self.store.latest_action_record(TARGET))
 
-    def test_post_commit_export_failure_never_grants_but_durable_context_recovers(self):
+    def test_post_commit_export_failure_never_grants_and_reopens_as_fenced_local_recovery(self):
         browser = self.start_pending()
         operation = self.store.latest_action_record(TARGET)['operation_id']
         export = self.app.store.export_logs
@@ -234,7 +234,20 @@ class RecoveryEvidenceWorkflowTests(unittest.TestCase):
         self.assertEqual(requested['operation_id'], operation)
         self.assertEqual(requested['recovery_evidence']['known_tracking_ids'], sorted([TARGET, CONTROL]))
         self.finish_unknown(browser)
-        self.restart_and_verify()
+        self.close_app()
+        self.store = DataStore(self.folder)
+        self.open_app()
+        # No permit crossed the durable send boundary. The new recovery
+        # protocol closes this original intent locally; a fresh read-only
+        # verification would be a distinct observation, not the old deletion.
+        latest = self.store.latest_action_record(TARGET)
+        self.assertEqual(latest['operation_id'], operation)
+        self.assertEqual(latest['status'], 'cancelled')
+        self.assertEqual(latest['recovery_evidence'], requested['recovery_evidence'])
+        self.assertEqual(self.store.unresolved_actions(), [])
+        self.assertEqual(self.store.active_tracking_ids(), {TARGET})
+        self.assertIsNone(self.app.browser)
+        self.assertFalse(self.app.automatic)
 
 
 if __name__ == '__main__':

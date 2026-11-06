@@ -22,6 +22,7 @@ from uuid import uuid4
 
 from . import __version__
 from .core import AccountMismatch, DataStore, GuardError, Person, SnapshotApplyError, clean_name, money
+from .declared_recovery import DeclaredRecoveryClosed
 from .build_identity import diagnostic_build_identity
 from .revocation_permit import KeyInspectionError, RevocationNotSubmitted
 from .target_lock import TargetLockError
@@ -642,6 +643,10 @@ class App:
             item = self.audit_pending[0]
             try:
                 item["callback"]()
+            except DeclaredRecoveryClosed:
+                # The durable recovery audit already owns this exact old op.
+                # Replaying the rejected callback can never repair anything.
+                self._diagnostic('stale_recovered_callback', action=item['action'])
             except Exception as exc:
                 self._diagnostic("audit_save_failed", action=item["action"], error_type=type(exc).__name__)
                 self._audit_notice()
@@ -833,9 +838,14 @@ class App:
             if not self.recovery_mode:
                 self.status_var.set("已恢复原有统计。请检查表格并读取平台费用；不会自动执行任何删除。")
             try:
-                # Complete only an already durable local terminal; no browser
-                # request or new permission is produced by reopening a ledger.
-                self.responsibility_gate.reconcile(self.store)
+                # Resume fenced local recovery or a saved terminal only;
+                # reopening never produces a browser request or send permit.
+                recovered = self.responsibility_gate.reconcile(self.store)
+                if recovered:
+                    self.refresh_rows()
+                    self.refresh_events()
+                    self.status_var.set(f'已恢复并结清 {recovered} 项未取得发送许可的中断操作。'
+                                        '自动管理保持停止；请重新读取费用后正常启动。')
             except GuardError as exc:
                 self.status_var.set('账本已载入；共享责任需核查，读取与核实仍可用。' + safe_error(exc))
         except Exception as exc:
@@ -1346,6 +1356,8 @@ class App:
             if on_error:
                 try:
                     on_error(exc)
+                except DeclaredRecoveryClosed:
+                    self._diagnostic('stale_recovered_callback', action=action)
                 except Exception as log_exc:
                     log_failure = log_exc
                     self._queue_audit(lambda error=exc: on_error(error), action=action, result={"error_type": type(exc).__name__})
@@ -1434,6 +1446,10 @@ class App:
                     if action == "verify_revoke" and result.get("absent") is False and result.get("present") is True:
                         fields["outcome"] = "present_verified"
                 self._diagnostic("browser_action_completed", **fields)
+            except DeclaredRecoveryClosed:
+                self.delete_permit = None
+                self._diagnostic('stale_recovered_callback', action=action)
+                self.status_var.set('原操作已通过持久恢复结清；迟到结果已忽略，未改写处理记录。')
             except Exception as exc:
                 failure = exc
                 if result_received and on_result_error is not None:
@@ -2389,7 +2405,10 @@ class App:
                                           operation_id=operation_id, continuation=True)
         try:
             self._claim_targets(self.last_keys)
-            responsibility = self.responsibility_gate.claim(operation_store, operation_id, row['tracking_id'])
+            # Legacy manual browser handoff may be acted on outside our permit
+            # protocol, including before the prepared callback is persisted.
+            responsibility = self.responsibility_gate.claim(operation_store, operation_id,
+                row['tracking_id'], allow_declared_recovery=False)
             operation_store.record_action(row["name"], row["tracking_id"], "pending", "用户请求定位平台 Key 列表行；未执行删除",
                                           operation_id=operation_id,
                                           responsibility=responsibility.to_dict(),

@@ -1158,6 +1158,8 @@ class DataStore:
             payload['read_only'] = True
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
+            from .declared_recovery import reject_closed_operation
+            reject_closed_operation(db, operation_id)
             bound = db.execute("SELECT person FROM bindings WHERE tracking_id=?", (key_id,)).fetchone()
             if not bound or bound[0] != name:
                 raise GuardError("操作目标与既有绑定不一致，拒绝记录成功。")

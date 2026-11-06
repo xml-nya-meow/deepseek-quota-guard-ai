@@ -21,7 +21,7 @@ from uuid import UUID, uuid4
 from .core import GuardError
 
 
-SCHEMA = 1
+SCHEMA = 2
 DATABASE = 'responsibility.sqlite3'
 _HEX32 = re.compile(r'[0-9a-f]{32}')
 _HEX64 = re.compile(r'[0-9a-f]{64}')
@@ -35,6 +35,7 @@ _ERRORS = {
     'REGISTRY_LEDGER_MISMATCH': '账本身份、原登记路径或检查点不一致；不能接管或开启新写入。',
     'REGISTRY_RECEIPT_MISMATCH': '责任回执与原操作或代次不一致；未修改共享责任。',
     'REGISTRY_TRANSITION_REJECTED': '当前责任阶段不允许此变更；原责任保留。',
+    'REGISTRY_UPGRADE_REQUIRED': '共享责任登记需要显式升级恢复协议；升级前保持只读，不会重建登记。',
 }
 
 
@@ -158,7 +159,7 @@ class ResponsibilityRegistry:
         except (OSError, ValueError, UnicodeError):
             raise RegistryError() from None
         if (not isinstance(value, dict) or set(value) != {'schema', 'epoch', 'revision'}
-                or type(value['schema']) is not int or value['schema'] != SCHEMA
+                or type(value['schema']) is not int or value['schema'] not in (1, SCHEMA)
                 or not _matches(_HEX32, value['epoch'])
                 or type(value['revision']) is not int or not 0 <= value['revision'] < 2**63):
             raise RegistryError()
@@ -215,6 +216,7 @@ class ResponsibilityRegistry:
                 db.execute('CREATE TABLE ledgers (ledger_id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, checkpoint INTEGER NOT NULL CHECK(checkpoint>=0))')
                 db.execute('CREATE TABLE obligations (generation INTEGER PRIMARY KEY, ledger_id TEXT NOT NULL REFERENCES ledgers(ledger_id), operation_id TEXT NOT NULL UNIQUE, target_hash TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN (\'declared\',\'possible_send\',\'settled\')), origin TEXT NOT NULL CHECK(origin IN (\'claim\',\'migration\')), resolution TEXT, UNIQUE(ledger_id,operation_id))')
                 db.execute('CREATE TABLE active_slot (singleton INTEGER PRIMARY KEY CHECK(singleton=1), generation INTEGER NOT NULL UNIQUE REFERENCES obligations(generation))')
+                self._create_recovery_table(db)
                 db.execute('INSERT INTO metadata VALUES(1,?,?,?,?,?,?)',
                            (SCHEMA, epoch, 0, 0, 'initializing', json.dumps(sorted(expected_ledger_ids))))
                 db.execute(f'PRAGMA user_version={SCHEMA}')
@@ -225,12 +227,20 @@ class ResponsibilityRegistry:
             raise RegistryError() from None
         return self.snapshot()
 
-    def _validated(self, db):
+    @staticmethod
+    def _create_recovery_table(db):
+        db.execute('CREATE TABLE obligation_recovery (generation INTEGER PRIMARY KEY REFERENCES obligations(generation), prior_checkpoint INTEGER, recovery_id TEXT UNIQUE)')
+
+    def _validated(self, db, *, allow_v1=False):
         anchor = self._read_anchor()
-        if db.execute('PRAGMA user_version').fetchone()[0] != SCHEMA:
+        schema = db.execute('PRAGMA user_version').fetchone()[0]
+        if schema not in (1, SCHEMA) or anchor['schema'] != schema:
             raise RegistryError()
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if tables != {'metadata', 'ledgers', 'obligations', 'active_slot'}:
+        expected_tables = {'metadata', 'ledgers', 'obligations', 'active_slot'}
+        if schema == SCHEMA:
+            expected_tables.add('obligation_recovery')
+        if tables != expected_tables:
             raise RegistryError()
         if db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
             raise RegistryError()
@@ -240,7 +250,7 @@ class ResponsibilityRegistry:
         if len(rows) != 1:
             raise RegistryError()
         meta = dict(rows[0])
-        if (meta['singleton'] != 1 or meta['schema'] != SCHEMA
+        if (meta['singleton'] != 1 or meta['schema'] != schema
                 or meta['epoch'] != anchor['epoch'] or meta['revision'] != anchor['revision']
                 or type(meta['generation']) is not int or not 0 <= meta['generation'] < 2**63
                 or meta['phase'] not in ('initializing', 'ready')):
@@ -275,10 +285,32 @@ class ResponsibilityRegistry:
                     or (row['phase'] == 'settled' and row['resolution'] not in ('absent_verified', 'not_submitted'))
                     or (row['phase'] != 'settled' and row['resolution'] is not None)):
                 raise RegistryError()
+        if schema == SCHEMA:
+            fields = [row['name'] for row in db.execute('PRAGMA table_info(obligation_recovery)')]
+            if fields != ['generation', 'prior_checkpoint', 'recovery_id']:
+                raise RegistryError()
+            contexts = db.execute('SELECT r.*,o.ledger_id,o.phase,o.origin,o.resolution FROM obligation_recovery r JOIN obligations o USING(generation)').fetchall()
+            count = db.execute('SELECT count(*) FROM obligations').fetchone()[0]
+            if len(contexts) != count or db.execute('SELECT count(*) FROM obligation_recovery').fetchone()[0] != count:
+                raise RegistryError()
+            for row in contexts:
+                prior = row['prior_checkpoint']
+                if prior is not None:
+                    expected_prior = db.execute('SELECT coalesce(max(generation),0) FROM obligations WHERE ledger_id=? AND generation<?',
+                                                (row['ledger_id'], row['generation'])).fetchone()[0]
+                    if type(prior) is not int or prior != expected_prior:
+                        raise RegistryError()
+                if row['recovery_id'] is not None and (
+                        not _matches(_HEX32, row['recovery_id']) or row['origin'] != 'claim'
+                        or row['phase'] not in ('declared', 'settled')
+                        or row['phase'] == 'settled' and row['resolution'] != 'not_submitted'):
+                    raise RegistryError()
+        elif not allow_v1:
+            raise RegistryError('REGISTRY_UPGRADE_REQUIRED')
         return meta, anchor
 
     @contextmanager
-    def _transaction(self, *, write=False):
+    def _transaction(self, *, write=False, allow_v1=False):
         _plain(self.directory, directory=True)
         _plain(self.db_path)
         db = None
@@ -294,7 +326,7 @@ class ResponsibilityRegistry:
             # at COMMIT after publication; (2) an anchor read must not straddle
             # another writer's commit. No browser/network work occurs inside.
             db.execute('BEGIN EXCLUSIVE')
-            meta, anchor = self._validated(db)
+            meta, anchor = self._validated(db, allow_v1=allow_v1)
             yield db, meta
             if write and db.total_changes:
                 revision = meta['revision'] + 1
@@ -317,6 +349,22 @@ class ResponsibilityRegistry:
                 if db.in_transaction:
                     db.rollback()
                 db.close()
+
+    def upgrade_v1(self):
+        """Explicitly upgrade a healthy pair without inventing old evidence.
+
+        Existing receipts and epochs remain unchanged. Old obligations have no
+        recorded claim-time checkpoint, so their prior_checkpoint stays NULL.
+        A torn anchor/database upgrade remains blocked, just like any write.
+        """
+        with self._transaction(write=True, allow_v1=True) as (db, meta):
+            if meta['schema'] == SCHEMA:
+                return False
+            self._create_recovery_table(db)
+            db.execute('INSERT INTO obligation_recovery SELECT generation,NULL,NULL FROM obligations')
+            db.execute('UPDATE metadata SET schema=? WHERE singleton=1', (SCHEMA,))
+            db.execute(f'PRAGMA user_version={SCHEMA}')
+            return True
 
     def _ledger(self, db, ledger_id, checkpoint=None):
         if not _matches(_HEX32, ledger_id):
@@ -388,7 +436,8 @@ class ResponsibilityRegistry:
                 raise RegistryError('REGISTRY_INITIALIZING')
             db.execute("UPDATE metadata SET phase='ready' WHERE singleton=1")
 
-    def _new_obligation(self, ledger_id, operation_id, target_hash, expected_checkpoint, *, migration):
+    def _new_obligation(self, ledger_id, operation_id, target_hash, expected_checkpoint, *, migration,
+                        allow_declared_recovery=True):
         if type(expected_checkpoint) is not int or expected_checkpoint < 0:
             raise RegistryError('REGISTRY_LEDGER_MISMATCH')
         with self._transaction(write=True) as (db, meta):
@@ -414,14 +463,23 @@ class ResponsibilityRegistry:
             phase, origin = ('possible_send', 'migration') if migration else ('declared', 'claim')
             db.execute('INSERT INTO obligations VALUES(?,?,?,?,?,?,NULL)',
                        (generation, ledger_id, operation_id, target_hash, phase, origin))
+            db.execute('INSERT INTO obligation_recovery VALUES(?,?,NULL)',
+                       (generation, expected_checkpoint if allow_declared_recovery else None))
             if not migration:
                 db.execute('INSERT INTO active_slot VALUES(1,?)', (generation,))
             db.execute('UPDATE metadata SET generation=? WHERE singleton=1', (generation,))
             db.execute('UPDATE ledgers SET checkpoint=? WHERE ledger_id=?', (generation, ledger_id))
             return Receipt(meta['epoch'], ledger_id, operation_id, target_hash, generation)
 
-    def claim(self, ledger_id, operation_id, target_hash, *, expected_checkpoint):
-        return self._new_obligation(ledger_id, operation_id, target_hash, expected_checkpoint, migration=False)
+    def claim(self, ledger_id, operation_id, target_hash, *, expected_checkpoint,
+              allow_declared_recovery=True):
+        if type(allow_declared_recovery) is not bool:
+            raise RegistryError('REGISTRY_TRANSITION_REJECTED')
+        # A legacy manual-page handoff may allow the user to delete outside our
+        # permit path. Its unknown predecessor context deliberately disables
+        # the never-authorized recovery shortcut from the moment of claim.
+        return self._new_obligation(ledger_id, operation_id, target_hash, expected_checkpoint,
+                                    migration=False, allow_declared_recovery=allow_declared_recovery)
 
     def register_unresolved(self, ledger_id, operation_id, target_hash, *, expected_checkpoint):
         return self._new_obligation(ledger_id, operation_id, target_hash, expected_checkpoint, migration=True)
@@ -434,12 +492,18 @@ class ResponsibilityRegistry:
             raise RegistryError('REGISTRY_RECEIPT_MISMATCH')
         return receipt, row
 
-    def mark_possible_send(self, receipt):
+    def mark_possible_send(self, receipt, *, before_mark=None):
         with self._transaction(write=True) as (db, meta):
             receipt, row = self._matching(db, meta, receipt)
-            if row['phase'] == 'settled' or row['origin'] != 'claim':
+            recovery = self._recovery(db, receipt)
+            if recovery['recovery_id'] is not None or row['phase'] == 'settled' or row['origin'] != 'claim':
                 raise RegistryError('REGISTRY_TRANSITION_REJECTED')
             if row['phase'] == 'declared':
+                # The production gate durably witnesses the send boundary in
+                # the original ledger here. Holding this same registry lock
+                # prevents a recovery precheck from racing that local write.
+                if before_mark is not None:
+                    before_mark()
                 db.execute("UPDATE obligations SET phase='possible_send' WHERE generation=?", (receipt.generation,))
             return receipt
 
@@ -448,12 +512,73 @@ class ResponsibilityRegistry:
             raise RegistryError('REGISTRY_TRANSITION_REJECTED')
         with self._transaction(write=True) as (db, meta):
             receipt, row = self._matching(db, meta, receipt)
+            if self._recovery(db, receipt)['recovery_id'] is not None:
+                raise RegistryError('REGISTRY_TRANSITION_REJECTED')
             if row['phase'] == 'settled':
                 return False
             if resolution == 'not_submitted' and row['phase'] != 'declared':
                 raise RegistryError('REGISTRY_TRANSITION_REJECTED')
             db.execute("UPDATE obligations SET phase='settled',resolution=? WHERE generation=?",
                        (resolution, receipt.generation))
+            db.execute('DELETE FROM active_slot WHERE generation=?', (receipt.generation,))
+            return True
+
+    @staticmethod
+    def _recovery(db, receipt):
+        row = db.execute('SELECT prior_checkpoint,recovery_id FROM obligation_recovery WHERE generation=?',
+                         (receipt.generation,)).fetchone()
+        if row is None:
+            raise RegistryError()
+        return {'receipt': receipt.to_dict(), 'prior_checkpoint': row['prior_checkpoint'],
+                'recovery_id': row['recovery_id']}
+
+    def recovery_for(self, receipt):
+        """Read original recovery context; this never freezes or authorizes."""
+        with self._transaction() as (db, meta):
+            receipt, _ = self._matching(db, meta, receipt)
+            return self._recovery(db, receipt)
+
+    def freeze_declared(self, receipt, *, before_freeze=None):
+        """Durably deny promotion while retaining the original occupied slot."""
+        with self._transaction(write=True) as (db, meta):
+            receipt, row = self._matching(db, meta, receipt)
+            slot = db.execute('SELECT generation FROM active_slot WHERE singleton=1').fetchone()
+            if (row['origin'] != 'claim' or row['phase'] != 'declared'
+                    or slot is None or slot['generation'] != receipt.generation):
+                raise RegistryError('REGISTRY_TRANSITION_REJECTED')
+            recovery = self._recovery(db, receipt)
+            recovery_id = recovery['recovery_id'] or uuid4().hex
+            if before_freeze is not None:
+                # Give the callback a detached context. It may inspect/write
+                # local evidence, but cannot substitute our original fence.
+                before_freeze({'receipt': receipt.to_dict(),
+                               'prior_checkpoint': recovery['prior_checkpoint'],
+                               'recovery_id': recovery_id})
+            if recovery['recovery_id'] is None:
+                db.execute('UPDATE obligation_recovery SET recovery_id=? WHERE generation=?',
+                           (recovery_id, receipt.generation))
+            return self._recovery(db, receipt)
+
+    def finish_declared_recovery(self, receipt, recovery_id):
+        """Release only this fence after the caller persists/exports local audit.
+
+        This method is not a generic release: a possible_send obligation never
+        receives a recovery fence, and ordinary release cannot bypass a fence.
+        """
+        if not _matches(_HEX32, recovery_id):
+            raise RegistryError('REGISTRY_RECEIPT_MISMATCH')
+        with self._transaction(write=True) as (db, meta):
+            receipt, row = self._matching(db, meta, receipt)
+            recovery = self._recovery(db, receipt)
+            if recovery['recovery_id'] != recovery_id or row['origin'] != 'claim':
+                raise RegistryError('REGISTRY_RECEIPT_MISMATCH')
+            if row['phase'] == 'settled' and row['resolution'] == 'not_submitted':
+                return False
+            slot = db.execute('SELECT generation FROM active_slot WHERE singleton=1').fetchone()
+            if row['phase'] != 'declared' or slot is None or slot['generation'] != receipt.generation:
+                raise RegistryError('REGISTRY_TRANSITION_REJECTED')
+            db.execute("UPDATE obligations SET phase='settled',resolution='not_submitted' WHERE generation=?",
+                       (receipt.generation,))
             db.execute('DELETE FROM active_slot WHERE generation=?', (receipt.generation,))
             return True
 
@@ -468,7 +593,9 @@ class ResponsibilityRegistry:
     def _obligations(self, db, meta):
         return [{'receipt': Receipt(meta['epoch'], row['ledger_id'], row['operation_id'], row['target_hash'],
                                     row['generation']).to_dict(),
-                 'phase': row['phase'], 'origin': row['origin'], 'ledger_path': row['path']}
+                 'phase': row['phase'], 'origin': row['origin'], 'ledger_path': row['path'],
+                 'recovery': self._recovery(db, Receipt(meta['epoch'], row['ledger_id'], row['operation_id'],
+                                                       row['target_hash'], row['generation']))}
                 for row in db.execute("SELECT o.*,l.path FROM obligations o JOIN ledgers l USING(ledger_id) WHERE o.phase!='settled' ORDER BY generation")]
 
     def open_obligations(self):
