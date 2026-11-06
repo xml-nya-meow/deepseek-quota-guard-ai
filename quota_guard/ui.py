@@ -176,10 +176,12 @@ def prepare_initial_draft(rows) -> tuple[list[Person], int]:
 
 
 class App:
-    def __init__(self, root: tk.Tk, folder: Path, home_folder: Path | None = None):
+    def __init__(self, root: tk.Tk, folder: Path, home_folder: Path | None = None, *, responsibility_directory=None):
         self.root = root
         self.folder = Path(folder).resolve()
         self.home_folder = Path(home_folder or folder).resolve()
+        from .responsibility_gate import ResponsibilityGate
+        self.responsibility_gate = ResponsibilityGate(responsibility_directory)
         from .instance import FolderLock
         self.folder_lock = FolderLock(self.folder)
         self.target_lock = None
@@ -283,7 +285,8 @@ class App:
         for key, text, command in [("edit", "填写两列表格", self.edit_people),
                                    ("excel", "用 Excel/WPS 打开", self.open_excel),
                                    ("check", "检查表格", self.check_people),
-                                   ("inspect", "检查删除准备（只读）", self.inspect_revoke)]:
+                                   ("inspect", "检查删除准备（只读）", self.inspect_revoke),
+                                   ("responsibility", "建立本机责任范围", self.initialize_responsibility)]:
             button = ttk.Button(sheet_bar, text=text, command=self._button_command(key, command))
             button.pack(side="left", padx=(0, 7))
             self.buttons[key] = button
@@ -829,6 +832,12 @@ class App:
             self.action_states["setup"] = "已完成"
             if not self.recovery_mode:
                 self.status_var.set("已恢复原有统计。请检查表格并读取平台费用；不会自动执行任何删除。")
+            try:
+                # Complete only an already durable local terminal; no browser
+                # request or new permission is produced by reopening a ledger.
+                self.responsibility_gate.reconcile(self.store)
+            except GuardError as exc:
+                self.status_var.set('账本已载入；共享责任需核查，读取与核实仍可用。' + safe_error(exc))
         except Exception as exc:
             self.config = None
             self.summary_var.set("已有数据需要核查；未覆盖文件，未清零统计。")
@@ -838,6 +847,33 @@ class App:
     def _show_config(self):
         c = self.config
         self.summary_var.set(f"分配人数 {c.people_count}　｜　本期总预算 ¥{amount_text(c.total_budget)}　｜　公共人均额度 ¥{amount_text(c.share)}　｜　起点 {c.start_date}（UTC+8）")
+
+    def initialize_responsibility(self):
+        """One explicit migration declaration, never per-key authorisation."""
+        if not self.config or self.busy or self.observing or self.closing or self.audit_failed:
+            return
+        stores = [self.store]
+        while messagebox.askyesno('纳入已有账本',
+                '当前账本已列入范围。是否还有需要纳入的旧账本？\n'
+                '有：选择其数据目录，可重复添加。无：结束选择。\n'
+                '只盘点所选目录，不会扫描其他文件。', parent=self.root):
+            path = filedialog.askdirectory(title='选择另一个已有账本的数据目录', parent=self.root)
+            if not path:
+                return
+            candidate = DataStore(Path(path))
+            candidate.load(require_workbook=False)
+            if all(s.folder != candidate.folder for s in stores):
+                stores.append(candidate)
+        if not messagebox.askyesno('一次性建立本机责任范围',
+                '已声明账本数：' + str(len(stores)) + '\n'
+                '请先关闭旧版管理程序，确认需要保护的旧账本都已纳入。\n'
+                '本程序不能发现未选入的旧历史，也不能约束旧客户端、其他 Windows 用户或其他设备。\n'
+                '登记缺失或来源不明时请恢复原登记，不能以此重置责任。\n'
+                '创建后，原未决会阻止整个范围的新删除；证据充分时自动结清，不增加逐枚审批。\n\n'
+                '确认这是明确建立的新范围，且声明完整？', parent=self.root):
+            return
+        self.responsibility_gate.initialize(stores)
+        self.status_var.set('本机责任范围已建立。原未决须先核实；全自动管理仍需正常启动。')
 
     def choose_folder(self):
         if self.busy or self.closing or self.audit_failed:
@@ -1776,6 +1812,12 @@ class App:
         except GuardError as exc:
             self.error('自动管理未开启', exc, dialog=False)
             return
+        try:
+            self.responsibility_gate.reconcile(self.store)
+            self.responsibility_gate.check(self.store)
+        except GuardError as exc:
+            self.error('自动管理未开启', exc, dialog=False)
+            return
         managed = [p.name for p in self.store.read_people() if p.name and p.amount >= 0]
         fees_note = ("\n当前费用尚未就绪：费用未核验，仅零额度可处理；正额度人员的未知费用不会按零元计算。\n" if not self.collection_has_fees else "")
         confirmation_generation = self.management_generation
@@ -2172,6 +2214,8 @@ class App:
         checked_session = self.session_generation
         operation_store = self.store
         operation_id = uuid4().hex
+        # Claim is shared by automatic and force; force only waives fees.
+        responsibility = self.responsibility_gate.claim(operation_store, operation_id, row['tracking_id'])
         if single:
             self.single_revoke_id = operation_id
             self.action_states.pop('stop', None)
@@ -2188,6 +2232,7 @@ class App:
             operation_store.record_action(row['name'], row['tracking_id'], status, detail,
                                           operation_id=operation_id, evidence=evidence,
                                           recovery_evidence=recovery_evidence,
+                                          responsibility=responsibility.to_dict() if status == 'pending' else None,
                                           intent='manual_force' if forced and status == 'pending' else None,
                                           continuation=status not in {'pending', 'requested'})
             if status == 'unknown_result':
@@ -2197,6 +2242,7 @@ class App:
                evidence=operation_store.action_evidence(row['name'], row['tracking_id']))
         verified_absence = False
         audit_recorded = False
+        authorization_marked = False
 
         def context_valid():
             return (not self.closing and active() and operation_store is self.store
@@ -2206,6 +2252,7 @@ class App:
                     and operation_store.workbook_hash() == checked_hash)
 
         def authorize():
+            nonlocal authorization_marked
             if not permit.ready.is_set() or permit.decided.is_set():
                 return
             if not context_valid():
@@ -2226,9 +2273,15 @@ class App:
             inventory = permit.prepared_inventory(row['tracking_id'])
             recovery_evidence = {'schema': 1, 'account_id': evidence['account_id'],
                                  **inventory, 'source': 'prepared_http_inventory_v1'}
-            record('requested', ('所选目标与强制删除意图已复核，未要求达到额度；' if forced else '目标与额度已复核，') +
-                   '控制台 HTTP 提交许可可能已发出；最终结果仍待平台核实',
-                   evidence=evidence, recovery_evidence=recovery_evidence)
+            if not self.responsibility_gate.possible_send(operation_store, responsibility,
+                    write_requested=lambda: record('requested',
+                        ('所选目标与强制删除意图已复核，未要求达到额度；' if forced else '目标与额度已复核，') +
+                        '控制台 HTTP 提交许可可能已发出；最终结果仍待平台核实',
+                        evidence=evidence, recovery_evidence=recovery_evidence),
+                    context_valid=context_valid):
+                permit.decide(False)
+                return
+            authorization_marked = True
             if not context_valid():
                 permit.decide(False)
                 return
@@ -2238,9 +2291,10 @@ class App:
             nonlocal verified_absence, audit_recorded
             self.delete_permit = None
             finish_single()
-            if result.get('cancelled') and not permit.allowed:
+            if result.get('cancelled') and not permit.allowed and not authorization_marked:
                 if not audit_recorded:
                     record('cancelled', '最终确认前已取消，未执行删除')
+                    self.responsibility_gate.settle(operation_store, responsibility)
                     audit_recorded = True
                 self.stop(quiet=True)
                 self._action_state("revoke", "已取消")
@@ -2250,6 +2304,7 @@ class App:
                 verified_absence = True
                 if not audit_recorded:
                     record('absent_verified', '撤销尝试后已核实平台列表中不再存在此 Tracking ID；不据此确定删除原因，在途费用仍可能入账')
+                    self.responsibility_gate.settle(operation_store, responsibility)
                     audit_recorded = True
                 self._action_state("revoke", "已确认不存在")
                 self.status_var.set(f"{row['name']}：平台列表中已不存在该 Key，处理记录已保存。" +
@@ -2278,6 +2333,7 @@ class App:
                 return
             if isinstance(exc, RevocationNotSubmitted) and not permit.ready.is_set() and not permit.allowed:
                 record('not_submitted', safe_error(exc))
+                self.responsibility_gate.settle(operation_store, responsibility)
                 self._action_state('revoke', '准备失败，未提交')
                 self.refresh_rows()
             else:
@@ -2333,8 +2389,10 @@ class App:
                                           operation_id=operation_id, continuation=True)
         try:
             self._claim_targets(self.last_keys)
+            responsibility = self.responsibility_gate.claim(operation_store, operation_id, row['tracking_id'])
             operation_store.record_action(row["name"], row["tracking_id"], "pending", "用户请求定位平台 Key 列表行；未执行删除",
                                           operation_id=operation_id,
+                                          responsibility=responsibility.to_dict(),
                                           evidence=operation_store.action_evidence(row['name'], row['tracking_id']))
         except Exception as exc:
             self.error("未执行操作：日志无法保存", exc)
@@ -2405,6 +2463,14 @@ class App:
             if not audit_recorded:
                 record(state, detail)
                 audit_recorded = True
+                if absent:
+                    try:
+                        self.responsibility_gate.settle_operation(operation_store, operation_id)
+                    except GuardError:
+                        self.status_var.set('平台缺席已记录，但共享责任尚未结清；请保留账本和登记核查。')
+                        self.refresh_rows()
+                        self.refresh_events()
+                        return
             self.refresh_rows()
             self.refresh_events()
             self._action_state("verify", "已完成" if absent or present else "待核实")

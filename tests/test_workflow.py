@@ -11,7 +11,8 @@ import unittest
 from unittest.mock import patch
 
 from quota_guard.core import AccountMismatch, DataStore, Person, TZ, GuardError
-from quota_guard.ui import App, COLLECTION_MAX_AGE_SECONDS
+from isolated_app import App
+from quota_guard.ui import COLLECTION_MAX_AGE_SECONDS
 from quota_guard.browser_service import check_identity, key_fingerprint
 from quota_guard.workspace import current_ledger
 

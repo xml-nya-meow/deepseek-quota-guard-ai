@@ -7,7 +7,8 @@ from unittest.mock import Mock, patch
 
 from quota_guard.preferences import (DEFAULT_POLL_INTERVAL_SECONDS, PREFERENCES_FILENAME,
                                      load_poll_interval, save_poll_interval, validate_poll_interval)
-from quota_guard.ui import App, COLLECTION_MAX_AGE_SECONDS, TZ, collection_is_fresh
+from isolated_app import App
+from quota_guard.ui import COLLECTION_MAX_AGE_SECONDS, TZ, collection_is_fresh
 from quota_guard.scheduler import CandidateQueue
 
 

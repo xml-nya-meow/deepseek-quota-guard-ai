@@ -338,6 +338,51 @@ class ResponsibilityRegistryTests(unittest.TestCase):
             with self.subTest(item=item), self.assertRaises(RegistryError):
                 validate_receipt(item)
 
+    def test_enrollment_blocks_claims_until_declared_new_member_is_registered_and_finished(self):
+        self.initialize()
+        identity, path = uuid4().hex, self.folder / 'Z'
+        path.mkdir()
+        with self.assertRaises(RegistryError):
+            self.registry.register_ledger(identity, path)
+        before = self.registry.registered_ledgers()
+        result = self.registry.begin_enrollment(identity)
+        self.assertEqual(result['expected_ledger_ids'], sorted([*self.ids, identity]))
+        self.assertEqual(self.registry.snapshot()['phase'], 'initializing')
+        self.assertEqual(self.registry.registered_ledgers(), before)
+        with self.assertRaises(RegistryError):
+            self.claim()
+        with self.assertRaises(RegistryError):
+            self.registry.finish_initialization()
+        with self.assertRaises(RegistryError):
+            self.registry.begin_enrollment(uuid4().hex)
+        self.registry.register_ledger(identity, path)
+        with self.assertRaises(RegistryError):
+            self.registry.claim(identity, uuid4().hex, TARGET, expected_checkpoint=0)
+        self.registry.finish_initialization()
+        receipt = self.registry.claim(identity, uuid4().hex, TARGET, expected_checkpoint=0)
+        self.assertEqual(receipt.generation, 1)
+        self.assertEqual(receipt.ledger_id, identity)
+
+    def test_existing_member_and_open_responsibility_cannot_begin_enrollment(self):
+        self.initialize()
+        original = self.registry.snapshot()
+        with self.assertRaises(RegistryError):
+            self.registry.begin_enrollment(self.ids[0])
+        self.assertEqual(self.registry.snapshot(), original)
+        receipt = self.claim()
+        for possible in (False, True):
+            if possible:
+                self.registry.mark_possible_send(receipt)
+            before = self.registry.snapshot()
+            with self.assertRaises(RegistryError) as caught:
+                self.registry.begin_enrollment(uuid4().hex)
+            self.assertEqual(caught.exception.reason_code, 'REGISTRY_OCCUPIED')
+            self.assertEqual(self.registry.snapshot(), before)
+        self.registry.release(receipt)
+        identity = uuid4().hex
+        self.registry.begin_enrollment(identity)
+        self.assertEqual(self.registry.snapshot()['phase'], 'initializing')
+
 
 if __name__ == '__main__':
     unittest.main()

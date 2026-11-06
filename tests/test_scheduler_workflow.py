@@ -17,7 +17,7 @@ from unittest.mock import patch
 import test_workflow as fixtures
 from quota_guard.browser_service import key_fingerprint
 from quota_guard.core import DataStore, GuardError, Person, TZ
-from quota_guard.ui import App
+from isolated_app import App
 
 
 class PermitFuture(Future):

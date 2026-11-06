@@ -10,7 +10,8 @@ from unittest.mock import patch
 
 from quota_guard.core import DataStore, GuardError, Person, TZ
 from quota_guard.preferences import load_table_defaults, load_poll_interval, save_poll_interval
-from quota_guard.ui import App, prepare_initial_draft
+from isolated_app import App
+from quota_guard.ui import prepare_initial_draft
 
 
 def descendants(widget):

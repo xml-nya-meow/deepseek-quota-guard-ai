@@ -5,7 +5,7 @@ from tkinter import ttk
 import unittest
 from unittest.mock import Mock
 
-from quota_guard.ui import App
+from isolated_app import App
 from quota_guard.window_layout import ScrollableContent, fit_window
 
 

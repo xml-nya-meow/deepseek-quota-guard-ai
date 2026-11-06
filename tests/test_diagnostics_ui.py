@@ -6,7 +6,7 @@ from tkinter import ttk
 import unittest
 from unittest.mock import patch
 
-from quota_guard.ui import App
+from isolated_app import App
 
 
 def descendants(widget):

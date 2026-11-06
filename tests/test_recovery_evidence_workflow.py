@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 from quota_guard.browser_service import BrowserService, key_fingerprint
 from quota_guard.core import DataStore, GuardError, Person, TZ
-from quota_guard.ui import App
+from isolated_app import App
 
 
 TARGET = 'synthetic-ui-recovery-target'

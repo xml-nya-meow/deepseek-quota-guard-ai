@@ -263,6 +263,10 @@ class ResponsibilityRegistry:
                     or not Path(row['path']).is_absolute() or type(row['checkpoint']) is not int
                     or not 0 <= row['checkpoint'] <= meta['generation']):
                 raise RegistryError()
+        registered_ids = {row[0] for row in db.execute('SELECT ledger_id FROM ledgers')}
+        if (not registered_ids.issubset(expected)
+                or meta['phase'] == 'ready' and registered_ids != set(expected)):
+            raise RegistryError()
         for row in db.execute('SELECT * FROM obligations'):
             validate_receipt({'epoch': meta['epoch'], **{key: row[key] for key in
                 ('ledger_id', 'operation_id', 'target_hash', 'generation')}})
@@ -333,13 +337,37 @@ class ResponsibilityRegistry:
                 if os.path.normcase(previous['path']) != os.path.normcase(path) or previous['checkpoint'] != checkpoint:
                     raise RegistryError('REGISTRY_LEDGER_MISMATCH')
             else:
-                if (checkpoint != 0 or meta['phase'] == 'initializing'
-                        and ledger_id not in json.loads(meta['expected_ledgers'])):
+                if (checkpoint != 0 or meta['phase'] != 'initializing'
+                        or ledger_id not in json.loads(meta['expected_ledgers'])):
                     raise RegistryError('REGISTRY_LEDGER_MISMATCH')
                 if db.execute('SELECT 1 FROM ledgers WHERE path=?', (path,)).fetchone():
                     raise RegistryError('REGISTRY_LEDGER_MISMATCH')
                 db.execute('INSERT INTO ledgers VALUES(?,?,0)', (ledger_id, path))
             return {'ledger_id': ledger_id, 'path': path, 'epoch': meta['epoch'], 'checkpoint': checkpoint}
+
+    def begin_enrollment(self, ledger_id):
+        """Close the write gate before changing the roster in multiple ledgers.
+
+        No existing checkpoint is modified here. The caller registers only the
+        declared new ledger, persists the new roster witness in every member,
+        and explicitly finishes initialization. Interrupted enrollment stays
+        initializing; neither another enrollment nor a claim may bypass it.
+        """
+        if not _matches(_HEX32, ledger_id):
+            raise RegistryError('REGISTRY_LEDGER_MISMATCH')
+        with self._transaction(write=True) as (db, meta):
+            if meta['phase'] != 'ready':
+                raise RegistryError('REGISTRY_INITIALIZING')
+            if db.execute("SELECT 1 FROM obligations WHERE phase!='settled' LIMIT 1").fetchone():
+                raise RegistryError('REGISTRY_OCCUPIED')
+            identities = {row[0] for row in db.execute('SELECT ledger_id FROM ledgers')}
+            if ledger_id in identities or len(identities) >= 1000:
+                raise RegistryError('REGISTRY_LEDGER_MISMATCH')
+            identities.add(ledger_id)
+            db.execute("UPDATE metadata SET phase='initializing',expected_ledgers=? WHERE singleton=1",
+                       (json.dumps(sorted(identities)),))
+            return {'epoch': meta['epoch'], 'phase': 'initializing',
+                    'expected_ledger_ids': sorted(identities)}
 
     def check_ledger(self, ledger_id, path, epoch, checkpoint):
         if type(checkpoint) is not int or checkpoint < 0:

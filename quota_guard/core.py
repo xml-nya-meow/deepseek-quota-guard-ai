@@ -1108,7 +1108,8 @@ class DataStore:
     def record_action(self, name: str, tracking_id: str, status: str, detail: str, *,
                       operation_id: str | None = None, evidence: dict | None = None,
                       continuation: bool = False, read_only: bool = False,
-                      intent: str | None = None, recovery_evidence: dict | None = None):
+                      intent: str | None = None, recovery_evidence: dict | None = None,
+                      responsibility: dict | None = None):
         # Only the outcome of an existing operation can bypass the workbook.
         # New intents/approval and new evidence always require a valid table.
         config = self.load(require_workbook=not continuation)
@@ -1140,6 +1141,15 @@ class DataStore:
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", operation_id):
                 raise GuardError("操作编号无效。")
         payload = {"name": name, "tracking_id": key_id, "status": status, "detail": _safe_detail(detail)}
+        if responsibility is not None:
+            from .responsibility_gate import ledger_id, target_hash
+            from .responsibility_registry import validate_receipt
+            receipt = validate_receipt(responsibility)
+            if (status != 'pending' or continuation or read_only
+                    or receipt.operation_id != operation_id or receipt.ledger_id != ledger_id(self)
+                    or receipt.target_hash != target_hash(key_id)):
+                raise GuardError('共享责任回执不属于本次新操作，未建立撤销意图。')
+            payload['responsibility'] = receipt.to_dict()
         if operation_id is not None:
             payload["operation_id"] = operation_id
         if evidence is not None:
@@ -1153,6 +1163,23 @@ class DataStore:
                 raise GuardError("操作目标与既有绑定不一致，拒绝记录成功。")
             history = self._action_history(db)
             operation = self._operation_history(history, payload)
+            if responsibility is not None:
+                from .responsibility_gate import ANCHOR_KEY
+                if operation:
+                    raise GuardError('原操作不能重新占用责任槽或回填事前责任。')
+                saved = db.execute('SELECT value FROM meta WHERE key=?', (ANCHOR_KEY,)).fetchone()
+                old = json.loads(saved[0]) if saved else None
+                if (not old or old.get('epoch') != receipt.epoch
+                        or type(old.get('checkpoint')) is not int or old['checkpoint'] >= receipt.generation):
+                    raise GuardError('共享责任检查点与账本不一致，未建立撤销意图。')
+                db.execute('UPDATE meta SET value=? WHERE key=?',
+                           (json.dumps({**old, 'checkpoint': receipt.generation}), ANCHOR_KEY))
+            elif operation and operation[0].get('responsibility') is not None:
+                from .responsibility_registry import validate_receipt
+                original = validate_receipt(operation[0]['responsibility']).to_dict()
+                if any(event.get('responsibility') != original for event in operation):
+                    raise GuardError('原操作的责任回执不一致，不能继续记录。')
+                payload['responsibility'] = original
             original_recovery = self._operation_recovery_evidence(operation,
                 tracking_id=key_id, account_id=config.account_id)
             if status == 'requested' and original_recovery is not None:
