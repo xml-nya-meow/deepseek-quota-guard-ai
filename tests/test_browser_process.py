@@ -360,8 +360,8 @@ class BrowserProcessTests(unittest.TestCase):
                 self.assertEqual(service._temp_root, home / '临时浏览器')
                 self.assertEqual(directory, service._session_directory)
                 self.assertEqual(directory.parent, service._temp_root)
-                self.assertEqual(Path(first['gettempdir']), directory)
-                self.assertEqual({Path(value) for value in first['env'].values()}, {directory})
+                self.assertTrue(os.path.samefile(first['gettempdir'], directory))
+                self.assertTrue(all(os.path.samefile(value, directory) for value in first['env'].values()))
                 self.assertTrue(Path(first['fixture_file']).is_file())
                 neighbor = home / 'unrelated-file.txt'
                 neighbor.write_text('preserve this unrelated file', encoding='utf-8')

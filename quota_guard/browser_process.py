@@ -25,8 +25,8 @@ import uuid
 from .core import AccountMismatch, GuardError, _safe_detail
 from .revocation_permit import DeletePermit, KeyInspectionError, RevocationNotSubmitted
 from .target_lock import validate_lock_names
-from .profile_recovery import (WindowsLifetime, job_name, ownership, plain_directory,
-                               read_marker, recover_profiles, remove_profile_tree,
+from .profile_recovery import (WindowsLifetime, job_name, ownership, plain_directory, profile_access_directory,
+                               read_marker, recover_profiles, remove_profile_tree, resolved_profile_path,
                                witness_main, write_marker)
 
 
@@ -169,11 +169,15 @@ def _bootstrap(connection, target):
     directory = gate.get('temp_dir')
     if not isinstance(directory, str) or not Path(directory).is_dir():
         raise GuardError('本次浏览器临时目录不可用，未启动浏览器。')
+    from .browser_startup import owned_temp_path_alias
+    transport_directory = owned_temp_path_alias(directory)
     # This interpreter and its descendants alone inherit these settings. Node
     # uses TEMP/TMP on Windows; Python's cached selection is replaced as well.
+    # A verified 8.3 alias still names this exact owned directory. Keep the gate
+    # and parent ownership/cleanup records in their original canonical form.
     for name in ('TEMP', 'TMP', 'TMPDIR'):
-        os.environ[name] = directory
-    tempfile.tempdir = directory
+        os.environ[name] = transport_directory
+    tempfile.tempdir = transport_directory
     target(_PrimedConnection(connection, gate))
 
 
@@ -733,7 +737,7 @@ class IsolatedBrowserService:
                 if (self._plain_directory(directory) != self._session_directory_identity
                         or directory.resolve(strict=True) != directory):
                     raise GuardError('浏览器会话目录已被替换，未执行删除。')
-                pending = [directory]
+                pending = [profile_access_directory(directory)]
                 while pending:
                     current = pending.pop()
                     with os.scandir(current) as entries:
@@ -742,7 +746,7 @@ class IsolatedBrowserService:
                             if stat.S_ISLNK(metadata.st_mode) or getattr(metadata, 'st_file_attributes', 0) & 0x400:
                                 raise GuardError('浏览器临时文件含链接或重解析点，请处理后再次中断清理。')
                             child = Path(entry.path)
-                            if not child.resolve(strict=True).is_relative_to(directory):
+                            if not resolved_profile_path(child).is_relative_to(resolved_profile_path(directory)):
                                 raise GuardError('浏览器临时文件路径越界，未执行删除。')
                             if stat.S_ISDIR(metadata.st_mode):
                                 pending.append(child)

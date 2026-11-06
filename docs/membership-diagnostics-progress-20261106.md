@@ -16,6 +16,7 @@
 - 使用真实临时 SQLite 账本、真实 Gate、真实文件替换故障，验证初装及新增成员的导出失败重开恢复、不重复审计。
 - 覆盖计划保存前失败、本地读取失败、身份失配、共享表损坏、外部锚点失配和发布失败，确认结构损坏没有被误放行。
 - `git diff --check` 通过。
+- 固定提交 `7121905594df9eaf49ecaf2ebe329498d682c713` 的 [GitHub Windows CI](https://github.com/xml-nya-meow/deepseek-quota-guard-ai/actions/runs/42216661754) 已通过：**1195 项，889.726 秒**；该次 portable 任务未启用，不是云端构建通过。
 
 ## 仍未解决或未验证的事项
 

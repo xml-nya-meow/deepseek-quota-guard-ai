@@ -20,7 +20,8 @@ import time
 import uuid
 
 from .core import AccountMismatch, GuardError, _identifier, clean_name
-from .browser_startup import BrowserStartupError, check_browser_loopback
+from .browser_startup import (BrowserStartupError, BrowserTempPathError,
+                              check_browser_loopback, is_temp_path_too_long)
 from .cost_parser import NoUsageData, parse_cost_response
 from .page_notices import (dismiss_optional_notice, install_optional_notice_handler,
                            raise_optional_notice_error)
@@ -379,7 +380,15 @@ class BrowserService:
         self.pw = sync_playwright().start()
         self._stage('正在启动独立浏览器', phase='chromium')
         # Ephemeral context: no password, token or login state saved to a file.
-        self.browser = self.pw.chromium.launch(headless=False, timeout=30000)
+        try:
+            self.browser = self.pw.chromium.launch(headless=False, timeout=30000)
+        except Exception as exc:
+            if not is_temp_path_too_long(exc):
+                raise
+            safe = BrowserTempPathError()
+            self._log('browser_startup_failed', phase='chromium',
+                      reason_code=safe.reason_code, error_code=safe.error_code)
+            raise safe from None
         self.context = self.browser.new_context(locale='zh-CN', timezone_id='Asia/Shanghai', accept_downloads=True)
         self.page = self.context.new_page()
         self.page.set_default_timeout(12000)

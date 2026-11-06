@@ -310,20 +310,61 @@ def _recovery_lock(root):
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
+def resolved_profile_path(path):
+    """One canonical comparison spelling after strict filesystem resolution.
+
+    Python may retain the Win32 extended prefix only for long descendants.
+    Normalize that namespace spelling for boundary comparison, not for I/O.
+    """
+    resolved = Path(path).resolve(strict=True)
+    if os.name != 'nt':
+        return resolved
+    value = str(resolved)
+    if value[:8].upper() == '\\\\?\\UNC\\':
+        return Path('\\\\' + value[8:])
+    if value.startswith('\\\\?\\'):
+        ordinary = value[4:]
+        if (len(ordinary) >= 3 and ordinary[0].isascii() and ordinary[0].isalpha()
+                and ordinary[1:3] == ':\\'):
+            return Path(ordinary)
+        raise GuardError('浏览器临时路径命名空间不受支持，未清理。')
+    return resolved
+
+
+def profile_access_directory(directory):
+    """Shorter access spelling, with original identity/boundary still checked.
+
+    Node can create deep profile files through an 8.3 session alias even when
+    Windows APIs cannot open their full long spelling. Never relocate content
+    or substitute an unrelated directory merely to make cleanup succeed.
+    """
+    from .browser_startup import owned_temp_path_alias
+
+    directory = Path(directory).absolute()
+    identity = plain_directory(directory)
+    boundary = resolved_profile_path(directory)
+    access = Path(owned_temp_path_alias(str(directory)))
+    if (plain_directory(access) != identity or resolved_profile_path(access) != boundary
+            or not os.path.samefile(directory, access)
+            or plain_directory(directory) != identity):
+        raise GuardError('浏览器临时目录访问别名与原目录身份不符，未清理。')
+    return access
+
+
 def _safe_tree(directory):
     directory = Path(directory)
     # Reject linked ancestors before canonicalizing. A legal Windows 8.3 alias
     # has the same identity but cannot be compared lexically with resolved children.
-    plain_directory(directory)
-    boundary = directory.resolve(strict=True)
-    pending = [directory]
+    access = profile_access_directory(directory)
+    boundary = resolved_profile_path(directory)
+    pending = [access]
     while pending:
         current = pending.pop()
         with os.scandir(current) as entries:
             for entry in entries:
                 info = entry.stat(follow_symlinks=False)
                 if (stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400
-                        or not Path(entry.path).resolve(strict=True).is_relative_to(boundary)):
+                        or not resolved_profile_path(entry.path).is_relative_to(boundary)):
                     raise GuardError('遗留临时目录含链接或越界路径，未清理。')
                 if stat.S_ISDIR(info.st_mode):
                     pending.append(Path(entry.path))
@@ -334,7 +375,8 @@ def remove_profile_tree(directory):
     directory = Path(directory)
     parent_identity, identity = plain_directory(directory.parent), plain_directory(directory)
     _safe_tree(directory)
-    for child in directory.iterdir():
+    access = profile_access_directory(directory)
+    for child in access.iterdir():
         if child.name == MARKER:
             continue
         if (plain_directory(directory.parent) != parent_identity
@@ -350,11 +392,11 @@ def remove_profile_tree(directory):
     if (plain_directory(directory.parent) != parent_identity
             or plain_directory(directory) != identity):
         raise GuardError('临时目录在清理期间已变化，未移除所有权记录。')
-    marker = directory / MARKER
+    marker = access / MARKER
     if marker.exists() or marker.is_symlink():
         _plain_file(marker)
         marker.unlink()
-    directory.rmdir()
+    access.rmdir()
 
 
 def recover_profiles(root, *, probe=None):
