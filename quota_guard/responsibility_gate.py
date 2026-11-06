@@ -69,37 +69,37 @@ class ResponsibilityGate:
     def initialize(self, stores):
         """Explicitly declare all supplied ledgers, including old uncertainty.
 
-        Validate before creating anything. A copied/ambiguous origin or legacy
-        operation without an ID must be reconciled before scope establishment.
-        Interrupted migration remains blocked, never silently starts afresh.
+        Persist the full original plan before the first local witness changes.
+        Interrupted initialization can only continue that exact durable plan.
         """
-        stores = list(stores)
-        ids = [ledger_id(store) for store in stores]
-        if not ids or len(set(ids)) != len(ids) or any(ledger_anchor(s) is not None for s in stores):
+        from .membership_recovery import prepare_initial_plan, preflight
+        plan = prepare_initial_plan(list(stores))
+        self.registry.initialize(expected_ledger_ids=[m['ledger_id'] for m in plan['members']],
+                                 membership_plan=plan, before_plan=preflight)
+        self._execute_membership(plan['plan_id'])
+
+    def _execute_membership(self, plan_id):
+        from .membership_recovery import preflight, apply, verify
+        return self.registry.execute_membership_plan(
+            plan_id, preflight=preflight, apply=apply, verify=verify)
+
+    def _resume_membership(self, store, state):
+        """Only a member at its original declared location may resume a plan.
+
+        The registry serializes plan execution and checks its current identity
+        before any callback. No path discovery, replacement roster or send is
+        involved; an old initializing registry without a plan remains blocked.
+        """
+        if state['phase'] == 'ready':
+            return False
+        record = self.registry.membership_plan()
+        if record is None or record['state'] != 'pending':
+            raise RegistryError('REGISTRY_INITIALIZING')
+        identity = ledger_id(store)
+        original = next((m for m in record['payload']['members'] if m['ledger_id'] == identity), None)
+        if original is None or Path(store.folder).resolve() != Path(original['path']).resolve():
             raise RegistryError('REGISTRY_LEDGER_MISMATCH')
-        pending = []
-        operations = set()
-        for store, identity in zip(stores, ids):
-            for item in store.unresolved_actions():
-                if item.get('read_only'):
-                    continue
-                op = item.get('operation_id')
-                if not op or op in operations or item.get('inherited_from_period'):
-                    raise GuardError('旧操作缺少唯一原始编号或来自继承副本；请先在原账本核实，不会另造责任。')
-                operations.add(op)
-                pending.append((store, identity, item))
-        state = self.registry.initialize(expected_ledger_ids=ids)
-        epoch = state['epoch']
-        for store, identity in zip(stores, ids):
-            self.registry.register_ledger(identity, store.folder)
-        roster = _roster_hash(self.registry.registered_ledgers())
-        for store in stores:
-            _save_anchor(store, epoch, 0, roster)
-        for store, identity, item in pending:
-            receipt = self.registry.register_unresolved(identity, item['operation_id'],
-                target_hash(item['tracking_id']), expected_checkpoint=ledger_anchor(store)['checkpoint'])
-            _save_anchor(store, epoch, receipt.checkpoint)
-        self.registry.finish_initialization()
+        return self._execute_membership(record['plan_id'])
 
     def _enroll(self, store):
         identity = ledger_id(store)
@@ -120,17 +120,13 @@ class ResponsibilityGate:
         state = self.registry.snapshot()
         if state['phase'] != 'ready':
             raise RegistryError('REGISTRY_INITIALIZING')
-        self.registry.begin_enrollment(identity)
-        registered = self.registry.register_ledger(identity, store.folder)
-        members = self.registry.registered_ledgers()
-        roster = _roster_hash(members)
-        for member in members:
-            current = DataStore(member['path'])
-            if ledger_id(current) != member['ledger_id']:
-                raise RegistryError('REGISTRY_LEDGER_MISMATCH')
-            _save_anchor(current, member['epoch'], member['checkpoint'], roster)
-        self.registry.finish_initialization()
-        return registered
+        from .membership_recovery import prepare_enrollment_plan, preflight
+        plan = prepare_enrollment_plan(state, store)
+        self.registry.begin_membership_plan(plan, before_plan=preflight)
+        self._execute_membership(plan['plan_id'])
+        anchor = ledger_anchor(store)
+        return self.registry.check_ledger(identity, store.folder,
+                                          epoch=anchor['epoch'], checkpoint=anchor['checkpoint'])
 
     def _trusted_successor(self, store, members):
         """An inherited operation remains owned and resolved by its origin.
@@ -204,7 +200,7 @@ class ResponsibilityGate:
     def check(self, store):
         state = self.registry.snapshot()
         if state['phase'] != 'ready':
-            raise RegistryError('REGISTRY_INITIALIZING')
+            self._resume_membership(store, state)
         self._check_members()
         self._enroll(store)
         obligations = self.registry.open_obligations()
@@ -339,14 +335,16 @@ class ResponsibilityGate:
     def reconcile(self, store):
         """Resume local recovery or a saved terminal, never a remote request."""
         try:
-            self.registry.snapshot()
+            state = self.registry.snapshot()
         except RegistryError as exc:
             if exc.reason_code != 'REGISTRY_UPGRADE_REQUIRED':
                 raise
             # Explicit lifecycle entry, not constructor or a background reset.
             # Old obligations keep unknown predecessor context and cannot use
             # the new pre-authorization recovery shortcut.
-            self.registry.upgrade_v1()
+            self.registry.upgrade_schema()
+            state = self.registry.snapshot()
+        self._resume_membership(store, state)
         identity = ledger_id(store)
         recovered = 0
         for obligation in self.registry.open_obligations():

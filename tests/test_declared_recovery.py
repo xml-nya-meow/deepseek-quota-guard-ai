@@ -312,6 +312,7 @@ class DeclaredRecoveryTests(unittest.TestCase):
         with closing(sqlite3.connect(self.gate.registry.db_path)) as db:
             with db:
                 db.execute('DROP TABLE obligation_recovery')
+                db.execute('DROP TABLE membership_plan')
                 db.execute('UPDATE metadata SET schema=1')
                 db.execute('PRAGMA user_version=1')
         anchor = json.loads(self.gate.registry.anchor_path.read_text(encoding='utf-8'))

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from hashlib import sha256
 import json
 import math
 import os
@@ -21,7 +22,7 @@ from uuid import UUID, uuid4
 from .core import GuardError
 
 
-SCHEMA = 2
+SCHEMA = 3
 DATABASE = 'responsibility.sqlite3'
 _HEX32 = re.compile(r'[0-9a-f]{32}')
 _HEX64 = re.compile(r'[0-9a-f]{64}')
@@ -36,6 +37,8 @@ _ERRORS = {
     'REGISTRY_RECEIPT_MISMATCH': '责任回执与原操作或代次不一致；未修改共享责任。',
     'REGISTRY_TRANSITION_REJECTED': '当前责任阶段不允许此变更；原责任保留。',
     'REGISTRY_UPGRADE_REQUIRED': '共享责任登记需要显式升级恢复协议；升级前保持只读，不会重建登记。',
+    'REGISTRY_PLAN_REQUIRED': '成员迁移缺少完整持久计划；保持阻断，不能凭成员编号或旧步骤完成迁移。',
+    'REGISTRY_PLAN_STALE': '成员迁移计划已过期或与当前登记不一致；未写入任何成员见证。',
 }
 
 
@@ -77,6 +80,112 @@ def validate_receipt(value):
             or type(value['generation']) is not int or not 0 < value['generation'] < 2**63):
         raise RegistryError('REGISTRY_RECEIPT_MISMATCH')
     return Receipt(**value)
+
+
+def validate_membership_plan(value):
+    """Validate bounded structural facts without opening any member ledger.
+
+    Local callbacks separately verify account/history digests and exact anchors.
+    This function returns a detached JSON value so callers cannot mutate the
+    persisted plan or the deterministic migration generations through aliases.
+    """
+    def invalid():
+        raise RegistryError('REGISTRY_PLAN_STALE')
+    def number(item):
+        return type(item) is int and 0 <= item < 2**63
+    def path(item):
+        return isinstance(item, str) and 0 < len(item) <= 32768 and '\x00' not in item and Path(item).is_absolute()
+    def anchor(item, epoch):
+        return (isinstance(item, dict) and set(item) == {'epoch', 'checkpoint', 'roster_hash'}
+                and item['epoch'] == epoch and number(item['checkpoint'])
+                and _matches(_HEX64, item['roster_hash']))
+    fields = {'schema', 'plan_id', 'epoch', 'mode', 'base_generation', 'base_revision',
+              'before_members', 'members', 'operations', 'target_roster_hash'}
+    if (not isinstance(value, dict) or set(value) != fields or type(value['schema']) is not int
+            or value['schema'] != 1 or not _matches(_HEX32, value['plan_id'])
+            or not _matches(_HEX32, value['epoch']) or value['mode'] not in ('initialize', 'enroll')
+            or not number(value['base_generation']) or not number(value['base_revision'])
+            or not isinstance(value['before_members'], list) or len(value['before_members']) > 1000
+            or not isinstance(value['members'], list) or not 1 <= len(value['members']) <= 1000
+            or not isinstance(value['operations'], list) or len(value['operations']) > 10000
+            or not _matches(_HEX64, value['target_roster_hash'])):
+        invalid()
+    before = {}
+    for member in value['before_members']:
+        if (not isinstance(member, dict) or set(member) != {'ledger_id', 'path', 'checkpoint'}
+                or not _matches(_HEX32, member['ledger_id']) or member['ledger_id'] in before
+                or not path(member['path']) or not number(member['checkpoint'])
+                or member['checkpoint'] > value['base_generation']):
+            invalid()
+        before[member['ledger_id']] = member
+    members = {}
+    paths = set()
+    before_roster = sha256(json.dumps(sorted(before), separators=(',', ':')).encode('ascii')).hexdigest()
+    for member in value['members']:
+        if (not isinstance(member, dict) or set(member) != {'ledger_id', 'path', 'account_hash',
+                'history_digest', 'before_anchor', 'target_anchor'}
+                or not _matches(_HEX32, member['ledger_id']) or member['ledger_id'] in members
+                or not path(member['path']) or not _matches(_HEX64, member['account_hash'])
+                or not _matches(_HEX64, member['history_digest'])
+                or not anchor(member['target_anchor'], value['epoch'])
+                or member['target_anchor']['roster_hash'] != value['target_roster_hash']):
+            invalid()
+        canonical = os.path.normcase(os.path.normpath(member['path']))
+        if canonical in paths:
+            invalid()
+        paths.add(canonical)
+        original = before.get(member['ledger_id'])
+        if original is None:
+            if member['before_anchor'] is not None:
+                invalid()
+        elif (not anchor(member['before_anchor'], value['epoch'])
+              or os.path.normcase(member['path']) != os.path.normcase(original['path'])
+              or member['before_anchor'] != {'epoch': value['epoch'],
+                    'checkpoint': original['checkpoint'], 'roster_hash': before_roster}):
+            invalid()
+        members[member['ledger_id']] = member
+    if (list(before) != sorted(before) or list(members) != sorted(members)
+            or not set(before).issubset(members)
+            or value['target_roster_hash'] != sha256(json.dumps(sorted(members),
+                separators=(',', ':')).encode('ascii')).hexdigest()):
+        invalid()
+    if value['mode'] == 'initialize':
+        if before or value['base_generation'] != 0 or value['base_revision'] != 0:
+            invalid()
+    elif not before or set(before) == set(members) or value['operations']:
+        invalid()
+    checkpoints = {identity: before.get(identity, {}).get('checkpoint', 0) for identity in members}
+    operation_ids, targets, order = set(), set(), []
+    for index, operation in enumerate(value['operations'], start=1):
+        if (not isinstance(operation, dict) or set(operation) != {'ledger_id', 'operation_id',
+                'target_hash', 'generation', 'prior_checkpoint'}
+                or not isinstance(operation['ledger_id'], str) or operation['ledger_id'] not in members):
+            invalid()
+        try:
+            validate_receipt({'epoch': value['epoch'], **{key: operation[key] for key in
+                ('ledger_id', 'operation_id', 'target_hash', 'generation')}})
+        except RegistryError:
+            invalid()
+        identity, opid = operation['ledger_id'], operation['operation_id']
+        target = (identity, operation['target_hash'])
+        if (opid in operation_ids or target in targets or not number(operation['prior_checkpoint'])
+                or operation['generation'] != value['base_generation'] + index
+                or operation['prior_checkpoint'] != checkpoints[identity]):
+            invalid()
+        operation_ids.add(opid)
+        targets.add(target)
+        order.append((identity, opid))
+        checkpoints[identity] = operation['generation']
+    if order != sorted(order) or any(member['target_anchor']['checkpoint'] != checkpoints[identity]
+                                    for identity, member in members.items()):
+        invalid()
+    try:
+        serialized = json.dumps(value, ensure_ascii=True, allow_nan=False, separators=(',', ':'))
+        if len(serialized) > 8 * 1024 * 1024:
+            invalid()
+        return json.loads(serialized)
+    except (TypeError, ValueError, OverflowError):
+        invalid()
 
 
 def default_registry_directory():
@@ -159,7 +268,7 @@ class ResponsibilityRegistry:
         except (OSError, ValueError, UnicodeError):
             raise RegistryError() from None
         if (not isinstance(value, dict) or set(value) != {'schema', 'epoch', 'revision'}
-                or type(value['schema']) is not int or value['schema'] not in (1, SCHEMA)
+                or type(value['schema']) is not int or value['schema'] not in (1, 2, SCHEMA)
                 or not _matches(_HEX32, value['epoch'])
                 or type(value['revision']) is not int or not 0 <= value['revision'] < 2**63):
             raise RegistryError()
@@ -181,8 +290,17 @@ class ResponsibilityRegistry:
             if staging.exists():
                 staging.unlink()
 
-    def initialize(self, *, expected_ledger_ids):
+    def initialize(self, *, expected_ledger_ids=None, membership_plan=None, before_plan=None):
         """Begin an explicit one-time declared-ledger migration, never unlock it."""
+        plan = None if membership_plan is None else validate_membership_plan(membership_plan)
+        if plan is not None:
+            if plan['mode'] != 'initialize':
+                raise RegistryError('REGISTRY_PLAN_STALE')
+            planned_ids = [member['ledger_id'] for member in plan['members']]
+            if expected_ledger_ids is None:
+                expected_ledger_ids = planned_ids
+            elif set(expected_ledger_ids) != set(planned_ids):
+                raise RegistryError('REGISTRY_PLAN_STALE')
         if (not isinstance(expected_ledger_ids, (list, tuple, set, frozenset))
                 or not expected_ledger_ids or len(expected_ledger_ids) > 1000
                 or any(not _matches(_HEX32, item) for item in expected_ledger_ids)
@@ -192,7 +310,11 @@ class ResponsibilityRegistry:
             raise RegistryError()
         if self.directory.exists() and any(self.directory.iterdir()):
             raise RegistryError()
-        epoch = uuid4().hex
+        if plan is not None:
+            for member in plan['members']:
+                if os.path.normcase(_path(member['path'])) != os.path.normcase(member['path']):
+                    raise RegistryError('REGISTRY_LEDGER_MISMATCH')
+        epoch = uuid4().hex if plan is None else plan['epoch']
         anchor = {'schema': SCHEMA, 'epoch': epoch, 'revision': 0}
         try:
             self.directory.parent.mkdir(parents=True, exist_ok=True)
@@ -217,8 +339,14 @@ class ResponsibilityRegistry:
                 db.execute('CREATE TABLE obligations (generation INTEGER PRIMARY KEY, ledger_id TEXT NOT NULL REFERENCES ledgers(ledger_id), operation_id TEXT NOT NULL UNIQUE, target_hash TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN (\'declared\',\'possible_send\',\'settled\')), origin TEXT NOT NULL CHECK(origin IN (\'claim\',\'migration\')), resolution TEXT, UNIQUE(ledger_id,operation_id))')
                 db.execute('CREATE TABLE active_slot (singleton INTEGER PRIMARY KEY CHECK(singleton=1), generation INTEGER NOT NULL UNIQUE REFERENCES obligations(generation))')
                 self._create_recovery_table(db)
+                self._create_membership_table(db)
                 db.execute('INSERT INTO metadata VALUES(1,?,?,?,?,?,?)',
                            (SCHEMA, epoch, 0, 0, 'initializing', json.dumps(sorted(expected_ledger_ids))))
+                if plan is not None:
+                    if before_plan is not None:
+                        before_plan(validate_membership_plan(plan))
+                    db.execute("INSERT INTO membership_plan VALUES(1,?,'pending',?)",
+                               (plan['plan_id'], json.dumps(plan)))
                 db.execute(f'PRAGMA user_version={SCHEMA}')
                 db.execute('COMMIT')
             finally:
@@ -231,15 +359,71 @@ class ResponsibilityRegistry:
     def _create_recovery_table(db):
         db.execute('CREATE TABLE obligation_recovery (generation INTEGER PRIMARY KEY REFERENCES obligations(generation), prior_checkpoint INTEGER, recovery_id TEXT UNIQUE)')
 
+    @staticmethod
+    def _create_membership_table(db):
+        db.execute("CREATE TABLE membership_plan (singleton INTEGER PRIMARY KEY CHECK(singleton=1), plan_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL CHECK(state IN ('pending','complete')), payload TEXT NOT NULL)")
+
+    @staticmethod
+    def _membership(db):
+        rows = db.execute('SELECT * FROM membership_plan').fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise RegistryError()
+        row = rows[0]
+        if (row['singleton'] != 1 or row['state'] not in ('pending', 'complete')
+                or not isinstance(row['payload'], str) or len(row['payload']) > 8 * 1024 * 1024):
+            raise RegistryError()
+        payload = validate_membership_plan(json.loads(row['payload']))
+        if row['plan_id'] != payload['plan_id']:
+            raise RegistryError()
+        return {'plan_id': row['plan_id'], 'state': row['state'], 'payload': payload}
+
+    def _validate_membership_state(self, db, meta):
+        fields = [row['name'] for row in db.execute('PRAGMA table_info(membership_plan)')]
+        if fields != ['singleton', 'plan_id', 'state', 'payload']:
+            raise RegistryError()
+        current = self._membership(db)
+        if current is None:
+            return
+        plan = current['payload']
+        actual = [dict(row) for row in db.execute('SELECT * FROM ledgers ORDER BY ledger_id')]
+        if (plan['epoch'] != meta['epoch']
+                or json.loads(meta['expected_ledgers']) != [m['ledger_id'] for m in plan['members']]):
+            raise RegistryError()
+        if current['state'] == 'pending':
+            if (meta['phase'] != 'initializing' or meta['generation'] != plan['base_generation']
+                    or meta['revision'] != plan['base_revision'] + (plan['mode'] == 'enroll')
+                    or actual != plan['before_members']):
+                raise RegistryError()
+        else:
+            target = {m['ledger_id']: m for m in plan['members']}
+            if (meta['phase'] != 'ready' or len(actual) != len(target)
+                    or meta['generation'] < plan['base_generation'] + len(plan['operations'])
+                    or any(row['ledger_id'] not in target
+                        or row['path'] != target[row['ledger_id']]['path']
+                        or row['checkpoint'] < target[row['ledger_id']]['target_anchor']['checkpoint']
+                        for row in actual)):
+                raise RegistryError()
+            for operation in plan['operations']:
+                saved = db.execute('SELECT * FROM obligations WHERE generation=?',
+                                   (operation['generation'],)).fetchone()
+                if (saved is None or saved['origin'] != 'migration'
+                        or any(saved[key] != operation[key] for key in
+                               ('ledger_id', 'operation_id', 'target_hash'))):
+                    raise RegistryError()
+
     def _validated(self, db, *, allow_v1=False):
         anchor = self._read_anchor()
         schema = db.execute('PRAGMA user_version').fetchone()[0]
-        if schema not in (1, SCHEMA) or anchor['schema'] != schema:
+        if schema not in (1, 2, SCHEMA) or anchor['schema'] != schema:
             raise RegistryError()
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         expected_tables = {'metadata', 'ledgers', 'obligations', 'active_slot'}
-        if schema == SCHEMA:
+        if schema >= 2:
             expected_tables.add('obligation_recovery')
+        if schema >= 3:
+            expected_tables.add('membership_plan')
         if tables != expected_tables:
             raise RegistryError()
         if db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
@@ -285,7 +469,7 @@ class ResponsibilityRegistry:
                     or (row['phase'] == 'settled' and row['resolution'] not in ('absent_verified', 'not_submitted'))
                     or (row['phase'] != 'settled' and row['resolution'] is not None)):
                 raise RegistryError()
-        if schema == SCHEMA:
+        if schema >= 2:
             fields = [row['name'] for row in db.execute('PRAGMA table_info(obligation_recovery)')]
             if fields != ['generation', 'prior_checkpoint', 'recovery_id']:
                 raise RegistryError()
@@ -305,7 +489,9 @@ class ResponsibilityRegistry:
                         or row['phase'] not in ('declared', 'settled')
                         or row['phase'] == 'settled' and row['resolution'] != 'not_submitted'):
                     raise RegistryError()
-        elif not allow_v1:
+        if schema >= 3:
+            self._validate_membership_state(db, meta)
+        if schema < SCHEMA and not allow_v1:
             raise RegistryError('REGISTRY_UPGRADE_REQUIRED')
         return meta, anchor
 
@@ -350,7 +536,7 @@ class ResponsibilityRegistry:
                     db.rollback()
                 db.close()
 
-    def upgrade_v1(self):
+    def upgrade_schema(self):
         """Explicitly upgrade a healthy pair without inventing old evidence.
 
         Existing receipts and epochs remain unchanged. Old obligations have no
@@ -360,11 +546,17 @@ class ResponsibilityRegistry:
         with self._transaction(write=True, allow_v1=True) as (db, meta):
             if meta['schema'] == SCHEMA:
                 return False
-            self._create_recovery_table(db)
-            db.execute('INSERT INTO obligation_recovery SELECT generation,NULL,NULL FROM obligations')
+            if meta['schema'] == 1:
+                self._create_recovery_table(db)
+                db.execute('INSERT INTO obligation_recovery SELECT generation,NULL,NULL FROM obligations')
+            self._create_membership_table(db)
             db.execute('UPDATE metadata SET schema=? WHERE singleton=1', (SCHEMA,))
             db.execute(f'PRAGMA user_version={SCHEMA}')
             return True
+
+    def upgrade_v1(self):
+        """Compatibility name for explicit upgrade of schema 1 or 2."""
+        return self.upgrade_schema()
 
     def _ledger(self, db, ledger_id, checkpoint=None):
         if not _matches(_HEX32, ledger_id):
@@ -376,46 +568,82 @@ class ResponsibilityRegistry:
         return dict(row)
 
     def register_ledger(self, ledger_id, path, *, checkpoint=0):
-        path = _path(path)
-        if not _matches(_HEX32, ledger_id) or type(checkpoint) is not int or checkpoint < 0:
-            raise RegistryError('REGISTRY_LEDGER_MISMATCH')
-        with self._transaction(write=True) as (db, meta):
-            previous = db.execute('SELECT * FROM ledgers WHERE ledger_id=?', (ledger_id,)).fetchone()
-            if previous is not None:
-                if os.path.normcase(previous['path']) != os.path.normcase(path) or previous['checkpoint'] != checkpoint:
-                    raise RegistryError('REGISTRY_LEDGER_MISMATCH')
-            else:
-                if (checkpoint != 0 or meta['phase'] != 'initializing'
-                        or ledger_id not in json.loads(meta['expected_ledgers'])):
-                    raise RegistryError('REGISTRY_LEDGER_MISMATCH')
-                if db.execute('SELECT 1 FROM ledgers WHERE path=?', (path,)).fetchone():
-                    raise RegistryError('REGISTRY_LEDGER_MISMATCH')
-                db.execute('INSERT INTO ledgers VALUES(?,?,0)', (ledger_id, path))
-            return {'ledger_id': ledger_id, 'path': path, 'epoch': meta['epoch'], 'checkpoint': checkpoint}
+        raise RegistryError('REGISTRY_PLAN_REQUIRED')
 
     def begin_enrollment(self, ledger_id):
-        """Close the write gate before changing the roster in multiple ledgers.
+        raise RegistryError('REGISTRY_PLAN_REQUIRED')
 
-        No existing checkpoint is modified here. The caller registers only the
-        declared new ledger, persists the new roster witness in every member,
-        and explicitly finishes initialization. Interrupted enrollment stays
-        initializing; neither another enrollment nor a claim may bypass it.
-        """
-        if not _matches(_HEX32, ledger_id):
-            raise RegistryError('REGISTRY_LEDGER_MISMATCH')
+    def membership_plan(self, plan_id=None):
+        with self._transaction() as (db, _):
+            current = self._membership(db)
+            if plan_id is not None and (current is None or current['plan_id'] != plan_id):
+                raise RegistryError('REGISTRY_PLAN_STALE')
+            return current
+
+    def begin_membership_plan(self, plan, *, before_plan=None):
+        plan = validate_membership_plan(plan)
+        if plan['mode'] != 'enroll':
+            raise RegistryError('REGISTRY_PLAN_STALE')
         with self._transaction(write=True) as (db, meta):
             if meta['phase'] != 'ready':
                 raise RegistryError('REGISTRY_INITIALIZING')
-            if db.execute("SELECT 1 FROM obligations WHERE phase!='settled' LIMIT 1").fetchone():
+            if db.execute("SELECT 1 FROM obligations WHERE phase!='settled'").fetchone():
                 raise RegistryError('REGISTRY_OCCUPIED')
-            identities = {row[0] for row in db.execute('SELECT ledger_id FROM ledgers')}
-            if ledger_id in identities or len(identities) >= 1000:
-                raise RegistryError('REGISTRY_LEDGER_MISMATCH')
-            identities.add(ledger_id)
+            current = self._membership(db)
+            actual = [dict(row) for row in db.execute('SELECT * FROM ledgers ORDER BY ledger_id')]
+            if (plan['epoch'] != meta['epoch'] or plan['base_generation'] != meta['generation']
+                    or plan['base_revision'] != meta['revision'] or actual != plan['before_members']
+                    or current is not None and (current['state'] != 'complete'
+                                               or current['plan_id'] == plan['plan_id'])):
+                raise RegistryError('REGISTRY_PLAN_STALE')
+            for member in plan['members']:
+                if os.path.normcase(_path(member['path'])) != os.path.normcase(member['path']):
+                    raise RegistryError('REGISTRY_LEDGER_MISMATCH')
+            if before_plan is not None:
+                before_plan(validate_membership_plan(plan))
+            db.execute("INSERT OR REPLACE INTO membership_plan VALUES(1,?,'pending',?)",
+                       (plan['plan_id'], json.dumps(plan)))
             db.execute("UPDATE metadata SET phase='initializing',expected_ledgers=? WHERE singleton=1",
-                       (json.dumps(sorted(identities)),))
-            return {'epoch': meta['epoch'], 'phase': 'initializing',
-                    'expected_ledger_ids': sorted(identities)}
+                       (json.dumps([m['ledger_id'] for m in plan['members']]),))
+            return {'plan_id': plan['plan_id'], 'state': 'pending', 'payload': plan}
+
+    def execute_membership_plan(self, plan_id, *, preflight, apply, verify):
+        if not _matches(_HEX32, plan_id) or not all(callable(c) for c in (preflight, apply, verify)):
+            raise RegistryError('REGISTRY_PLAN_STALE')
+        with self._transaction(write=True) as (db, meta):
+            current = self._membership(db)
+            if current is None:
+                raise RegistryError('REGISTRY_PLAN_REQUIRED')
+            if current['plan_id'] != plan_id:
+                raise RegistryError('REGISTRY_PLAN_STALE')
+            if current['state'] == 'complete':
+                return False
+            plan = current['payload']
+            # The plan was committed before this transaction. A failure rolls
+            # back shared rows but not local target witnesses: a retry uses
+            # this same plan and the same deterministic receipt generations.
+            preflight(validate_membership_plan(plan))
+            before_ids = {m['ledger_id'] for m in plan['before_members']}
+            for member in plan['members']:
+                if member['ledger_id'] not in before_ids:
+                    db.execute('INSERT INTO ledgers VALUES(?,?,0)',
+                               (member['ledger_id'], member['path']))
+            for operation in plan['operations']:
+                db.execute("INSERT INTO obligations VALUES(?,?,?,?,'possible_send','migration',NULL)",
+                           (operation['generation'], operation['ledger_id'],
+                            operation['operation_id'], operation['target_hash']))
+                db.execute('INSERT INTO obligation_recovery VALUES(?,?,NULL)',
+                           (operation['generation'], operation['prior_checkpoint']))
+            for member in plan['members']:
+                db.execute('UPDATE ledgers SET checkpoint=? WHERE ledger_id=?',
+                           (member['target_anchor']['checkpoint'], member['ledger_id']))
+            db.execute('UPDATE metadata SET generation=? WHERE singleton=1',
+                       (plan['base_generation'] + len(plan['operations']),))
+            apply(validate_membership_plan(plan))
+            verify(validate_membership_plan(plan))
+            db.execute("UPDATE membership_plan SET state='complete' WHERE singleton=1")
+            db.execute("UPDATE metadata SET phase='ready' WHERE singleton=1")
+            return True
 
     def check_ledger(self, ledger_id, path, epoch, checkpoint):
         if type(checkpoint) is not int or checkpoint < 0:
@@ -428,19 +656,15 @@ class ResponsibilityRegistry:
             return {**row, 'epoch': meta['epoch']}
 
     def finish_initialization(self):
-        with self._transaction(write=True) as (db, meta):
-            if meta['phase'] != 'initializing':
-                raise RegistryError('REGISTRY_TRANSITION_REJECTED')
-            actual = {row[0] for row in db.execute('SELECT ledger_id FROM ledgers')}
-            if actual != set(json.loads(meta['expected_ledgers'])):
-                raise RegistryError('REGISTRY_INITIALIZING')
-            db.execute("UPDATE metadata SET phase='ready' WHERE singleton=1")
+        raise RegistryError('REGISTRY_PLAN_REQUIRED')
 
     def _new_obligation(self, ledger_id, operation_id, target_hash, expected_checkpoint, *, migration,
                         allow_declared_recovery=True):
         if type(expected_checkpoint) is not int or expected_checkpoint < 0:
             raise RegistryError('REGISTRY_LEDGER_MISMATCH')
         with self._transaction(write=True) as (db, meta):
+            if not migration and meta['phase'] != 'ready':
+                raise RegistryError('REGISTRY_INITIALIZING')
             validate_receipt({'epoch': meta['epoch'], 'ledger_id': ledger_id,
                               'operation_id': operation_id, 'target_hash': target_hash, 'generation': 1})
             self._ledger(db, ledger_id, expected_checkpoint)
@@ -482,7 +706,7 @@ class ResponsibilityRegistry:
                                     migration=False, allow_declared_recovery=allow_declared_recovery)
 
     def register_unresolved(self, ledger_id, operation_id, target_hash, *, expected_checkpoint):
-        return self._new_obligation(ledger_id, operation_id, target_hash, expected_checkpoint, migration=True)
+        raise RegistryError('REGISTRY_PLAN_REQUIRED')
 
     def _matching(self, db, meta, receipt):
         receipt = validate_receipt(receipt)
@@ -611,4 +835,5 @@ class ResponsibilityRegistry:
             return {'schema': SCHEMA, 'epoch': meta['epoch'], 'phase': meta['phase'],
                     'generation': meta['generation'], 'revision': meta['revision'],
                     'ledgers': [{**dict(row), 'epoch': meta['epoch']} for row in db.execute('SELECT * FROM ledgers ORDER BY ledger_id')],
-                    'open_obligations': self._obligations(db, meta)}
+                    'open_obligations': self._obligations(db, meta),
+                    'membership_plan': self._membership(db)}

@@ -16,6 +16,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from quota_guard.responsibility_registry import ResponsibilityRegistry, RegistryError, Receipt
+from tests.responsibility_registry_fixture import plan_for, complete_plan
 
 
 TEMP_ROOT = Path(__file__).resolve().parents[2] / 'TEMP'
@@ -48,12 +49,11 @@ class ResponsibilityRegistryRecoveryTests(unittest.TestCase):
         for path in self.paths:
             path.mkdir()
 
-    def initialize(self, finish=True):
-        self.registry.initialize(expected_ledger_ids=self.ids)
-        for identity, path in zip(self.ids, self.paths):
-            self.registry.register_ledger(identity, path)
+    def initialize(self, finish=True, operations=()):
+        self.plan = plan_for(self.ids, self.paths, operations=operations)
+        self.registry.initialize(expected_ledger_ids=self.ids, membership_plan=self.plan)
         if finish:
-            self.registry.finish_initialization()
+            complete_plan(self.registry, self.plan)
 
     def claim(self, ledger=0, checkpoint=0):
         return self.registry.claim(self.ids[ledger], uuid4().hex, TARGET,
@@ -64,6 +64,7 @@ class ResponsibilityRegistryRecoveryTests(unittest.TestCase):
         # added table and versions here creates a synthetic old-format pair;
         # production upgrade never removes data or manufactures old evidence.
         with closing(sqlite3.connect(self.registry.db_path)) as db, db:
+            db.execute('DROP TABLE membership_plan')
             db.execute('DROP TABLE obligation_recovery')
             db.execute('UPDATE metadata SET schema=1')
             db.execute('PRAGMA user_version=1')
@@ -187,10 +188,8 @@ class ResponsibilityRegistryRecoveryTests(unittest.TestCase):
         self.assertTrue(self.registry.release(receipt, resolution='absent_verified'))
 
     def test_imported_legacy_obligation_cannot_be_frozen(self):
-        self.initialize(finish=False)
-        receipt = self.registry.register_unresolved(self.ids[0], 'synthetic-legacy', TARGET,
-                                                    expected_checkpoint=0)
-        self.registry.finish_initialization()
+        self.initialize(operations=[(self.ids[0], 'synthetic-legacy', TARGET)])
+        receipt = self.registry.receipt_for(self.ids[0], 'synthetic-legacy')
         with self.assertRaises(RegistryError):
             self.registry.freeze_declared(receipt)
         self.assertEqual(self.registry.open_obligations()[0]['origin'], 'migration')
@@ -212,7 +211,7 @@ class ResponsibilityRegistryRecoveryTests(unittest.TestCase):
         self.assertEqual(self.pair(), original)
         self.assertTrue(reopened.upgrade_v1())
         after = reopened.snapshot()
-        self.assertEqual(after['schema'], 2)
+        self.assertEqual(after['schema'], 3)
         for field in ('epoch', 'generation', 'phase', 'ledgers'):
             self.assertEqual(after[field], before[field])
         self.assertEqual(reopened.receipt_for(old.ledger_id, old.operation_id), old)
@@ -273,7 +272,7 @@ class ResponsibilityRegistryRecoveryTests(unittest.TestCase):
                 self.registry.upgrade_v1()
         with closing(sqlite3.connect(self.registry.db_path)) as db:
             self.assertEqual(db.execute('PRAGMA user_version').fetchone()[0], 1)
-        self.assertEqual(json.loads(self.registry.anchor_path.read_text(encoding='utf-8'))['schema'], 2)
+        self.assertEqual(json.loads(self.registry.anchor_path.read_text(encoding='utf-8'))['schema'], 3)
         before = self.pair()
         for action in (self.registry.snapshot, self.registry.upgrade_v1):
             with self.assertRaises(RegistryError) as caught:

@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from quota_guard.core import DataStore, GuardError, Person, TZ
 from quota_guard.responsibility_gate import (
-    ResponsibilityGate, _save_anchor, action_history, ledger_anchor, ledger_id, target_hash,
+    ResponsibilityGate, action_history, ledger_anchor, ledger_id, target_hash,
 )
 
 
@@ -280,25 +280,63 @@ class ResponsibilityGateTests(unittest.TestCase):
         self.assertIsNone(ledger_anchor(self.first))
 
     def test_interrupted_migration_keeps_initializing_and_does_not_recreate_empty_scope(self):
+        from quota_guard import membership_recovery
         operation = uuid4().hex
         self.first.record_action(NAME, TARGET, 'pending', 'synthetic old unresolved', operation_id=operation)
-        def fail_import_checkpoint(store, epoch, checkpoint, roster_hash=None):
-            if checkpoint:
-                raise OSError('synthetic local migration checkpoint failure')
-            return _save_anchor(store, epoch, checkpoint, roster_hash)
-        with patch('quota_guard.responsibility_gate._save_anchor', side_effect=fail_import_checkpoint):
-            with self.assertRaises(OSError):
+        original_history = action_history(self.first)
+        apply_member = membership_recovery._apply_member
+        applied = []
+        def fail_second_member(plan, member):
+            if applied:
+                raise RuntimeError('synthetic membership interruption')
+            apply_member(plan, member)
+            applied.append(member['ledger_id'])
+        with patch('quota_guard.membership_recovery._apply_member', side_effect=fail_second_member):
+            with self.assertRaises(RuntimeError):
                 self.initialize()
         state = self.gate.registry.snapshot()
         self.assertEqual(state['phase'], 'initializing')
-        self.assertEqual(len(state['open_obligations']), 1)
-        self.assertEqual(state['open_obligations'][0]['receipt']['operation_id'], operation)
-        self.assertEqual(ledger_anchor(self.first)['checkpoint'], 0)
-        with self.assertRaises(GuardError):
-            self.gate.check(self.second)
+        # A failed execution rolls back the shared import, but the original
+        # operation manifest and successful local witness remain recoverable.
+        self.assertEqual(state['open_obligations'], [])
+        plan = self.gate.registry.membership_plan()
+        self.assertEqual(plan['state'], 'pending')
+        self.assertEqual([o['operation_id'] for o in plan['payload']['operations']], [operation])
+        self.assertEqual(sum(ledger_anchor(s) is not None for s in (self.first, self.second)), 1)
         with self.assertRaises(GuardError):
             self.gate.initialize([self.first, self.second])
         self.assertEqual(self.gate.registry.snapshot(), state)
+        reopened = ResponsibilityGate(self.gate.registry.directory)
+        self.assertEqual(reopened.reconcile(DataStore(self.second.folder)), 0)
+        self.assertEqual(reopened.registry.snapshot()['phase'], 'ready')
+        self.assertEqual(reopened.registry.membership_plan()['plan_id'], plan['plan_id'])
+        self.assertEqual(reopened.registry.open_obligations()[0]['receipt']['operation_id'], operation)
+        self.assertEqual(action_history(self.first), original_history)
+        with self.assertRaises(GuardError):
+            reopened.check(self.second)
+
+    def test_same_target_in_two_origin_ledgers_keeps_both_old_operations(self):
+        # Different original ledgers are independent responsibilities, even if
+        # the platform target is the same. Neither operation may disappear.
+        self.second.save_people([Person(NAME, Decimal(0))])
+        self.second.bind_keys(self.keys, ACCOUNT)
+        operations = [uuid4().hex, uuid4().hex]
+        for store, operation in zip((self.first, self.second), operations):
+            store.record_action(NAME, TARGET, 'pending', 'synthetic legacy origin', operation_id=operation)
+        self.initialize()
+        imported = self.gate.registry.open_obligations()
+        self.assertEqual({a['receipt']['operation_id'] for a in imported}, set(operations))
+        self.assertEqual({a['receipt']['ledger_id'] for a in imported},
+                         {ledger_id(self.first), ledger_id(self.second)})
+        self.assertEqual({a['receipt']['target_hash'] for a in imported}, {target_hash(TARGET)})
+        for store, operation in zip((self.first, self.second), operations):
+            with self.assertRaises(GuardError):
+                self.gate.check(store)
+            store.record_action(NAME, TARGET, 'absent_verified', 'synthetic original verification',
+                                operation_id=operation, continuation=True)
+            self.assertTrue(self.gate.settle_operation(store, operation))
+        self.assertEqual(self.gate.registry.open_obligations(), [])
+        self.gate.check(self.first)
 
     def test_read_only_observation_does_not_create_shared_obligation_or_mutate_checked_scope(self):
         self.initialize()

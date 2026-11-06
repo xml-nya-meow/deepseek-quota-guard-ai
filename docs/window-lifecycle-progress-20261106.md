@@ -23,7 +23,9 @@
 - 新测试覆盖重复恢复不叠加任务，关闭前首次加载尚未执行，同步及异步中断失败，浏览器关闭失败，锁释放失败，关闭等待回调继续有效，以及一个 Tk 实例销毁后另一个实例继续处理事件。
 - 上述两份日志均未出现 `invalid command name`。测试使用注入的临时责任登记、合成账本和假的浏览器，没有访问真实平台。
 
-本地验证日志：`validation/lifecycle-timers-first.log`、`validation/lifecycle-timers-related.log`（位于开发工作区外层，不随源码上传）。GitHub 完整离线回归由本单元推送触发，其结果以对应提交的 Actions 为准；上文 126 项不是完整回归总数。
+本地验证日志：`validation/lifecycle-timers-first.log`、`validation/lifecycle-timers-related.log`（位于开发工作区外层，不随源码上传）。
+
+后续确认：固定提交 `6a0799ccba7756889f3551c6a154a197bdb858eb` 的 [GitHub Windows CI](https://github.com/xml-nya-meow/deepseek-quota-guard-ai/actions/runs/42209040106) 已通过，**1142 项 / 663.176 秒 / OK**，该次 CI 日志没有失效回调或主题警告。此结果不抹去上面本地相关回归实际观察到的主题警告；上文 126 项不是完整回归总数。
 
 ## 仍未解决或未验证的事项
 

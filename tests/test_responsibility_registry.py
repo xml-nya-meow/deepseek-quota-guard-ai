@@ -19,6 +19,7 @@ from uuid import uuid4
 from quota_guard.responsibility_registry import (
     Receipt, RegistryError, ResponsibilityRegistry, validate_receipt,
 )
+from tests.responsibility_registry_fixture import plan_for, complete_plan
 
 
 TEMP_ROOT = Path(__file__).resolve().parents[2] / 'TEMP'
@@ -51,13 +52,12 @@ class ResponsibilityRegistryTests(unittest.TestCase):
         for path in self.paths:
             path.mkdir()
 
-    def initialize(self, *, finish=True):
-        state = self.registry.initialize(expected_ledger_ids=self.ids)
+    def initialize(self, *, finish=True, operations=()):
+        self.plan = plan_for(self.ids, self.paths, operations=operations)
+        state = self.registry.initialize(expected_ledger_ids=self.ids, membership_plan=self.plan)
         self.epoch = state['epoch']
-        for ledger, path in zip(self.ids, self.paths):
-            self.registry.register_ledger(ledger, path)
         if finish:
-            self.registry.finish_initialization()
+            complete_plan(self.registry, self.plan)
 
     def claim(self, *, ledger=0, operation=None, checkpoint=0, target=TARGET):
         return self.registry.claim(self.ids[ledger], operation or uuid4().hex, target,
@@ -67,16 +67,17 @@ class ResponsibilityRegistryTests(unittest.TestCase):
         self.assertFalse(self.registry.directory.exists())
         with self.assertRaises(RegistryError):
             self.registry.snapshot()
-        state = self.registry.initialize(expected_ledger_ids=self.ids)
+        self.initialize(finish=False)
+        state = self.registry.snapshot()
         self.assertEqual(state['phase'], 'initializing')
-        self.registry.register_ledger(self.ids[0], self.paths[0])
+        with self.assertRaises(RegistryError):
+            self.registry.register_ledger(self.ids[0], self.paths[0])
         with self.assertRaises(RegistryError):
             self.registry.finish_initialization()
         with self.assertRaises(RegistryError) as caught:
             self.claim()
         self.assertEqual(caught.exception.reason_code, 'REGISTRY_INITIALIZING')
-        self.registry.register_ledger(self.ids[1], self.paths[1])
-        self.registry.finish_initialization()
+        complete_plan(self.registry, self.plan)
         self.assertEqual(self.registry.snapshot()['phase'], 'ready')
         self.assertEqual(self.claim().generation, 1)
 
@@ -133,11 +134,11 @@ class ResponsibilityRegistryTests(unittest.TestCase):
         self.assertGreater(next_receipt.generation, receipt.generation)
 
     def test_multiple_old_obligations_import_before_ready_and_all_block_new_claim(self):
-        self.initialize(finish=False)
-        first = self.registry.register_unresolved(self.ids[0], 'synthetic-old-one', TARGET, expected_checkpoint=0)
-        second = self.registry.register_unresolved(self.ids[1], 'synthetic-old-two', OTHER, expected_checkpoint=0)
+        self.initialize(operations=[(self.ids[0], 'synthetic-old-one', TARGET),
+                                    (self.ids[1], 'synthetic-old-two', OTHER)])
+        first = self.registry.receipt_for(self.ids[0], 'synthetic-old-one')
+        second = self.registry.receipt_for(self.ids[1], 'synthetic-old-two')
         self.assertNotEqual(first.generation, second.generation)
-        self.registry.finish_initialization()
         self.assertEqual(len(self.registry.open_obligations()), 2)
         self.registry.release(first)
         with self.assertRaises(RegistryError) as caught:
@@ -345,8 +346,9 @@ class ResponsibilityRegistryTests(unittest.TestCase):
         with self.assertRaises(RegistryError):
             self.registry.register_ledger(identity, path)
         before = self.registry.registered_ledgers()
-        result = self.registry.begin_enrollment(identity)
-        self.assertEqual(result['expected_ledger_ids'], sorted([*self.ids, identity]))
+        plan = plan_for([identity], [path], snapshot=self.registry.snapshot())
+        result = self.registry.begin_membership_plan(plan)
+        self.assertEqual([m['ledger_id'] for m in result['payload']['members']], sorted([*self.ids, identity]))
         self.assertEqual(self.registry.snapshot()['phase'], 'initializing')
         self.assertEqual(self.registry.registered_ledgers(), before)
         with self.assertRaises(RegistryError):
@@ -355,10 +357,11 @@ class ResponsibilityRegistryTests(unittest.TestCase):
             self.registry.finish_initialization()
         with self.assertRaises(RegistryError):
             self.registry.begin_enrollment(uuid4().hex)
-        self.registry.register_ledger(identity, path)
+        with self.assertRaises(RegistryError):
+            self.registry.register_ledger(identity, path)
         with self.assertRaises(RegistryError):
             self.registry.claim(identity, uuid4().hex, TARGET, expected_checkpoint=0)
-        self.registry.finish_initialization()
+        complete_plan(self.registry, plan)
         receipt = self.registry.claim(identity, uuid4().hex, TARGET, expected_checkpoint=0)
         self.assertEqual(receipt.generation, 1)
         self.assertEqual(receipt.ledger_id, identity)
@@ -370,17 +373,20 @@ class ResponsibilityRegistryTests(unittest.TestCase):
             self.registry.begin_enrollment(self.ids[0])
         self.assertEqual(self.registry.snapshot(), original)
         receipt = self.claim()
+        identity, path = uuid4().hex, self.folder / 'Z'
+        path.mkdir()
         for possible in (False, True):
             if possible:
                 self.registry.mark_possible_send(receipt)
             before = self.registry.snapshot()
+            plan = plan_for([identity], [path], snapshot=before)
             with self.assertRaises(RegistryError) as caught:
-                self.registry.begin_enrollment(uuid4().hex)
+                self.registry.begin_membership_plan(plan)
             self.assertEqual(caught.exception.reason_code, 'REGISTRY_OCCUPIED')
             self.assertEqual(self.registry.snapshot(), before)
         self.registry.release(receipt)
-        identity = uuid4().hex
-        self.registry.begin_enrollment(identity)
+        plan = plan_for([identity], [path], snapshot=self.registry.snapshot())
+        self.registry.begin_membership_plan(plan)
         self.assertEqual(self.registry.snapshot()['phase'], 'initializing')
 
 
