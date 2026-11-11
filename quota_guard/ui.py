@@ -21,7 +21,8 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from . import __version__
-from .core import AccountMismatch, DataStore, GuardError, Person, SnapshotApplyError, clean_name, money
+from .core import (AccountMismatch, DataStore, GuardError, Person, SnapshotApplyError,
+                   clean_name, money, validate_key_periods)
 from .declared_recovery import DeclaredRecoveryClosed
 from .build_identity import diagnostic_build_identity
 from .revocation_permit import KeyInspectionError, RevocationNotSubmitted
@@ -55,6 +56,12 @@ FEE_STATE_LABELS = {
     "HTTP_ERROR": "平台读取失败", "PLATFORM_REJECTED": "平台拒绝读取",
     "PERIOD_INCOMPLETE": "账单范围不足", "PERIOD_MISMATCH": "账单范围不符",
     "CHARGE_TYPE_UNSUPPORTED": "费用类别待适配",
+    "LIFETIME_METADATA_INVALID": "创建日期未核验",
+    "LIFETIME_SCOPE_UNSUPPORTED": "目标类型不支持历史累计",
+    "LIFETIME_QUERY_LIMIT": "历史查询超过工作量上限",
+    "LIFETIME_QUERY_TIMEOUT": "历史查询超时",
+    "LIFETIME_PERIOD_INCOMPLETE": "创建以来费用未完整",
+    "LIFETIME_IDENTITY_CHANGED": "读取期间目标信息变化",
 }
 COLLECTION_RESULT_CODES = frozenset(FEE_STATE_LABELS) | {
     'OK', 'NOT_COLLECTED', 'SCHEMA_UNSUPPORTED', 'SOURCE_MISMATCH',
@@ -69,6 +76,10 @@ COLLECTION_COVERAGE_FIELDS = (
     'active_missing_count',
 )
 COLLECTION_REJECTION_LABELS = {
+    'FEE_BASIS_MISMATCH': ('统计方式不匹配', '返回费用与当前账本统计方式不同，未应用费用；请使用当前版本重新读取。'),
+    'LIFETIME_PERIOD_INVALID': ('创建日期未核验', '本次缺少完整、有效的逐 Key 创建日期证据，未更新费用或授予自动管理资格。'),
+    'KEY_CREATION_EVIDENCE_INVALID': ('创建证据需核查', '已有创建日期证据无法核验，请保留账本与诊断日志。'),
+    'KEY_CREATION_CHANGED': ('创建日期发生变化', '同一 Tracking ID 的创建时间与已存证据不一致，旧金额已保留，请核查平台信息。'),
     'TARGET_IN_USE': ('其他实例占用', '平台读取已返回，但本机旧版本、其他管理器或退出清理进程仍占用目标；本次未绑定、未写入费用。请正常关闭旧管理器并等待清理完成，再在本窗口重新读取；无需改日期、清空账本或重新登录。'),
     'TARGET_LOCK_FAILED': ('目标保护不可用', '平台读取已返回，但本机目标保护未能建立；本次未绑定、未写入费用。请查看诊断并正常退出本程序后重开；未认定为其他实例占用。'),
     'COLLECTION_CONTEXT_CHANGED': ('读取期间设置已变化', '本次结果不属于当前账本或统计设置，未应用费用或绑定；请按当前设置重新读取。'),
@@ -274,7 +285,7 @@ class App:
         specs = [
             ("folder", "数据文件夹", self.choose_folder),
             ("setup", "新建列表", self.setup),
-            ("date", "修改统计起点", self.change_start_date),
+            ("date", "统计方式", self.change_statistics_mode),
             ("template", "保存 Excel 模板", self.save_template),
             ("import_people", "导入人员 Excel", self.import_people),
             ("import", "检查官方导出", self.import_billing),
@@ -408,7 +419,9 @@ class App:
             state = self.action_states.get(key)
             if key == "start":
                 label = ("启动前：正在重新读取" if self.pending_start is not None else
-                         "全自动管理：已开启" if self.observing else ("全自动管理：已停止" if state == "已停止" else "启动全自动管理"))
+                         "全自动管理：已开启" if self.observing else
+                         "全自动管理：已停止" if state == "已停止" else
+                         "全自动管理：未开启" if state == "未开启" else "启动全自动管理")
             elif state:
                 label = {"login": "登录", "collect": "读取费用"}.get(key, label) + "：" + state
             enabled = ready
@@ -749,7 +762,8 @@ class App:
         except Exception:
             return ''
         when = datetime.fromtimestamp(fact['observed_wall'], TZ).strftime('%m-%d %H:%M:%S')
-        return (f"最近费用已保存：{fact['start_date']} 至 {fact['end_date']}，"
+        period = ('各 Key 创建以来' if fact.get('fee_basis') == 'key_lifetime' else fact['start_date'])
+        return (f"最近费用已保存：{period} 至 {fact['end_date']}，"
                 f"读取于 {when}（UTC+8）。")
 
     @staticmethod
@@ -773,7 +787,8 @@ class App:
     def _collection_context(self):
         config = self.store.load()
         return (self.session_generation, self.folder, config.period_id, config.account_id,
-                config.start_date, config.people_count, config.total_budget, self.store.workbook_hash())
+                config.start_date, config.people_count, config.total_budget, self.store.workbook_hash(),
+                config.fee_basis)
 
     def _remember_collection(self, result, *, application=None):
         # Publish only after every fallible read succeeds. An observation of S1
@@ -802,7 +817,7 @@ class App:
         if application is not None:
             self.last_saved_fee_fact = dict(folder=self.folder, period_id=context[2],
                 source_id=source, start_date=context[4], end_date=end_date,
-                observed_wall=observed_wall)
+                observed_wall=observed_wall, fee_basis=context[8])
 
     def _collection_is_current(self):
         return (self.collection_context is not None
@@ -902,7 +917,9 @@ class App:
 
     def _show_config(self):
         c = self.config
-        self.summary_var.set(f"分配人数 {c.people_count}　｜　本期总预算 ¥{amount_text(c.total_budget)}　｜　公共人均额度 ¥{amount_text(c.share)}　｜　起点 {c.start_date}（UTC+8）")
+        period = ('各 Key 创建以来累计 · 持续更新（UTC+8）' if c.fee_basis == 'key_lifetime'
+                  else f'旧周期：{c.start_date} 起（UTC+8）；可在“统计方式”切换')
+        self.summary_var.set(f"分配人数 {c.people_count}　｜　本期总预算 ¥{amount_text(c.total_budget)}　｜　公共人均额度 ¥{amount_text(c.share)}　｜　{period}")
 
     def initialize_responsibility(self):
         """One explicit migration declaration, never per-key authorisation."""
@@ -970,7 +987,7 @@ class App:
             self._queue_login(correct_initial=False)
         elif self.config:
             self._action_state("date", "已完成")
-            self.status_var.set("统计起点已修改，旧账本已保留。请重新读取费用；自动管理保持停止。")
+            self.status_var.set("统计方式或列表已切换，旧账本已保留。请重新读取费用；自动管理保持停止。")
 
     def _queue_change(self, callback: Callable, status: str):
         if self.audit_failed:
@@ -1011,8 +1028,41 @@ class App:
         finally:
             self._update_buttons()
 
+    def change_statistics_mode(self):
+        if (self.recovery_mode or not self.config or self.busy or self.closing or self.audit_failed
+                or self.interrupting or self.pending_change is not None):
+            return
+        if self.config.fee_basis == 'key_lifetime':
+            messagebox.showinfo('创建以来累计',
+                '当前逐枚按平台创建日期至每次读取当天累计费用（UTC+8），自动管理持续更新。\n'
+                '建账日期不截断历史消费；未填写和 -1 的行不查询。\n'
+                '以平台已返回的账单为准；历史明细不完整时不会补零。', parent=self.root)
+            return
+        self.stop(quiet=True)
+        original_store, original_context = self.store, self._collection_context()[1:]
+        decision = messagebox.askyesnocancel('切换费用统计方式',
+            '当前为旧周期统计。是否改为每枚 Key 从创建日期累计到每次读取当天？\n\n'
+            '是：建立独立的创建以来账本，沿用人员、额度、绑定和未决处理；保留原账本，费用重新读取。'
+            '历史消费可能立即达到额度，切换后自动管理保持停止。\n'
+            '否：继续旧周期方式，仅修改统计起点。\n取消：保持当前账本。', parent=self.root)
+        if decision is None:
+            return
+        if not decision:
+            self.change_start_date()
+            return
+        def change():
+            if self.store is not original_store or self._collection_context()[1:] != original_context:
+                raise GuardError('确认期间原账本或设置已变化，未切换统计方式。')
+            successor = original_store.create_successor(new_ledger_path(self.home_folder),
+                datetime.now(TZ).date().isoformat(), keep_account=True, fee_basis='key_lifetime')
+            self._switch_folder(successor.folder, reset_session=False)
+        self._queue_change(change, '保留旧账本，切换为创建以来累计。')
+
     def change_start_date(self):
         if self.recovery_mode or not self.config or self.closing or self.audit_failed:
+            return
+        if self.config.fee_basis == 'key_lifetime':
+            self.change_statistics_mode()
             return
         self.stop(quiet=True)
         start = ask_text("修改统计起点", "新的统计起点（YYYY-MM-DD）：\n将保留原账本，并从完整新周期重新读取费用。",
@@ -1069,7 +1119,7 @@ class App:
         values = [tk.StringVar(value=str(self.config.people_count) if self.config else "14"),
                   tk.StringVar(value=amount_text(self.config.total_budget) if self.config else "1500"),
                   tk.StringVar(value=self.config.start_date if self.config else datetime.now(TZ).strftime("%Y-%m-%d"))]
-        for row, (label, value) in enumerate(zip(["分配人数", "本期总预算（元）", "统计起点（YYYY-MM-DD）"], values), 1):
+        for row, (label, value) in enumerate(zip(["分配人数", "本期总预算（元）", "列表日期（不截断历史费用）"], values), 1):
             ttk.Label(body, text=label).grid(row=row, column=0, sticky="w", pady=7, padx=(0, 18))
             ttk.Entry(body, textvariable=value, width=24).grid(row=row, column=1, sticky='ew')
         line_var = tk.StringVar(value=amount_text(self.table_defaults.kill_line))
@@ -1088,7 +1138,7 @@ class App:
                         value=True, state='normal' if self.config else 'disabled').pack(anchor='w')
         ttk.Radiobutton(choices, text='建立空白列表（使用上方新表默认值）', variable=inherit_var,
                         value=False).pack(anchor='w')
-        scroller.wrap(ttk.Label(body, text="点击创建后进入独立新列表，旧列表和记录完整保留；取消则不新建。\n延续只保留人员与个人额度，费用按所选日期重新读取。\n同账户的 Key 绑定和未结清处理记录始终保留。\n公共额度按总预算 ÷ 人数向下取整到元；空白姓名不纳入管理。", wraplength=500), padding=48).grid(row=7, column=0, columnspan=2, pady=15, sticky="w")
+        scroller.wrap(ttk.Label(body, text="新列表按各 Key 创建日期至读取当天累计，之后持续更新；上方列表日期不限制历史费用。\n旧列表和记录完整保留；取消则不新建。延续保留人员与个人额度，费用重新核验。\n同账户的 Key 绑定和未结清处理记录始终保留。\n公共额度按总预算 ÷ 人数向下取整到元；空白姓名不纳入管理。", wraplength=500), padding=48).grid(row=7, column=0, columnspan=2, pady=15, sticky="w")
 
         def validate_source():
             if (self.store is not original_store or self.config != original_config
@@ -1117,10 +1167,12 @@ class App:
                 self._invalidate_collection(session=True)
                 if original_config:
                     successor = original_store.create_list(new_ledger_path(self.home_folder), n, budget, start,
-                                                           inherit_people=inherit_var.get(), initial_amount=defaults.amount)
+                                                           inherit_people=inherit_var.get(), initial_amount=defaults.amount,
+                                                           fee_basis='key_lifetime')
                     self._switch_folder(successor.folder, reset_session=False)
                 else:
-                    self.config = self.store.initialize(n, budget, start, initial_amount=defaults.amount)
+                    self.config = self.store.initialize(n, budget, start, initial_amount=defaults.amount,
+                                                        fee_basis='key_lifetime')
                     save_current_ledger(self.home_folder, self.folder)
             except Exception as exc:
                 messagebox.showerror("创建失败", safe_error(exc), parent=dialog)
@@ -1720,8 +1772,11 @@ class App:
             self._diagnostic('cost_collection_skipped', reason_code='NO_MANAGED_KEYS', count=0)
             return
         requested_start = requested_context[4]
+        requested_basis = requested_context[8]
+        query_label = ('各 Key 创建以来的全部费用' if requested_basis == 'key_lifetime'
+                       else f'{requested_start} 起的费用')
         self._show_collection_summary(f'费用核验：正在查询 {len(managed_names)} 个受管名称、'
-                                      f'{requested_start} 起的费用；未填写和 -1 的行不查询。')
+                                      f'{query_label}；未填写和 -1 的行不查询。')
 
         def done(result):
             incoming_reason = result.get('reason_code', 'OK')
@@ -1740,7 +1795,28 @@ class App:
                 raise SnapshotApplyError('采集期间账本、身份或统计设置已变化，未应用本次绑定或费用。',
                                          reason_code='COLLECTION_CONTEXT_CHANGED', stage='local_context',
                                          persistence_state='not_written', operation_id=operation_id)
-            state['period_label'] = f"{requested_start} 至 {result['end_date']}（UTC+8），"
+            if result.get('fee_basis', 'period') != requested_basis:
+                raise SnapshotApplyError('返回费用的统计方式与本次请求不一致。',
+                    reason_code='FEE_BASIS_MISMATCH', stage='local_context',
+                    persistence_state='not_written', operation_id=operation_id)
+            lifetime_periods = None
+            metadata_ready = requested_basis == 'period'
+            if requested_basis == 'key_lifetime':
+                try:
+                    if not isinstance(result.get('requested_tracking_ids'), list):
+                        raise GuardError('创建以来查询缺少明确的目标范围。')
+                    lifetime_periods = validate_key_periods(result.get('key_periods'),
+                        end_date=result['end_date'], expected_ids=result.get('requested_tracking_ids'))
+                    metadata_ready = result.get('reason_code') not in {
+                        'LIFETIME_METADATA_INVALID', 'LIFETIME_SCOPE_UNSUPPORTED', 'LIFETIME_IDENTITY_CHANGED'}
+                except GuardError:
+                    metadata_ready = False
+                if result.get('totals') is not None and not metadata_ready:
+                    raise SnapshotApplyError('创建以来费用缺少完整目标时间证据。',
+                        reason_code='LIFETIME_PERIOD_INVALID', stage='local_context',
+                        persistence_state='not_written', operation_id=operation_id)
+            period_label = '各 Key 创建以来' if requested_basis == 'key_lifetime' else requested_start
+            state['period_label'] = f"{period_label} 至 {result['end_date']}（UTC+8），"
             state['platform_coverage'] = result.get('coverage_summary')
             state['stage'] = 'target_lock_acquisition'
             self._claim_targets(result['keys'])
@@ -1764,11 +1840,23 @@ class App:
             self._collection_trace('collection_identity_verified', operation_id, 'binding_verification')
             if result.get('totals') is None:
                 state['stage'] = 'identity_refresh'
+                if not metadata_ready:
+                    # Invalid creation evidence cannot drive a queue that would
+                    # immediately collect again without the configured delay.
+                    self.stop(quiet=True)
                 self.retry_collection = bool(result.get('retryable'))
                 self.last_keys = result['keys']
                 self.refresh_rows(readonly=True)
                 self.refresh_events(strict=True)
-                self._remember_collection(result)
+                if metadata_ready:
+                    if requested_basis == 'key_lifetime':
+                        try:
+                            self.store.validate_lifetime_observation(lifetime_periods,
+                                end_date=result['end_date'], expected_ids=result['requested_tracking_ids'])
+                        except GuardError as exc:
+                            raise SnapshotApplyError(str(exc), reason_code='KEY_CREATION_EVIDENCE_INVALID',
+                                stage='identity_refresh', persistence_state='not_written') from exc
+                    self._remember_collection(result)
                 reason = result.get('reason_code', 'SCHEMA_UNSUPPORTED')
                 self.collection_reason_code = reason
                 self._action_state("collect", FEE_STATE_LABELS.get(reason, "费用结构待核验"))
@@ -1806,7 +1894,8 @@ class App:
             state['stage'] = 'snapshot_validation'
             application = self.store.apply_snapshot_result(
                 result["totals"], result["source_id"], result["start_date"], result["end_date"],
-                operation_id=operation_id)
+                operation_id=operation_id, **({'fee_basis': requested_basis, 'key_periods': lifetime_periods}
+                                              if requested_basis == 'key_lifetime' else {}))
             state['application'] = application
             self._collection_trace('collection_snapshot_result', operation_id, 'audit_export',
                                    reason_code=application.reason_code,
@@ -1849,36 +1938,80 @@ class App:
                                  exc, operation_id=operation_id, state=state),
                              diagnostic_operation_id=operation_id, operation_id=operation_id,
                              start_date=requested_start,
+                             **({'fee_basis': requested_basis} if requested_basis == 'key_lifetime' else {}),
                              managed_names=managed_names,
                              account_id=requested_context[3],
                              known_keys=self.store.active_tracking_ids())
 
+    def _start_blocked(self, stage, reason_code, message, *, dialog=False):
+        # Fixed codes/stages are sufficient for diagnosis: do not emit exception
+        # text, paths, account identifiers or unresolved operation contents.
+        self._diagnostic('start_blocked', stage=stage, reason_code=reason_code)
+        if self.closing or self.window_destroyed:
+            return
+        self._action_state('start', '未开启')
+        text = f'自动管理未开启：{safe_error(message)}（{reason_code}）'
+        self.status_var.set(text)
+        if dialog:
+            messagebox.showerror('自动管理未开启', text, parent=self.root)
+
     def start(self):
-        if self.recovery_mode or self.busy or self.observing or self.pending_start is not None or self.pending_login or self.pending_change is not None or self.closing or self.interrupting or self.cleanup_failed or self.audit_failed or not self.check_people(show_dialog=False):
+        if self.observing:
+            self._diagnostic('start_ignored', stage='precondition', reason_code='ALREADY_RUNNING')
+            return
+        preconditions = (
+            (self.closing or self.window_destroyed, 'WINDOW_CLOSING', '窗口正在关闭。'),
+            (self.recovery_mode, 'WORKBOOK_RECOVERY_REQUIRED', '请先恢复人员表，再读取费用。'),
+            (self.busy, 'OPERATION_BUSY', '当前操作尚未完成，请等待完成后启动。'),
+            (self.pending_start is not None, 'START_REFRESH_PENDING', '正在重新核验费用，请等待完成。'),
+            (self.pending_login, 'LOGIN_PENDING', '登录切换尚未完成，请完成登录并读取费用。'),
+            (self.pending_change is not None, 'LEDGER_CHANGE_PENDING', '账本切换尚未完成，请等待完成后读取费用。'),
+            (self.interrupting, 'INTERRUPT_PENDING', '当前操作仍在中断清理，请等待完成。'),
+            (self.cleanup_failed, 'CLEANUP_REQUIRED', '清理尚未完成，请先重试中断清理或正常退出程序。'),
+            (self.audit_failed, 'AUDIT_RECOVERY_REQUIRED', '处理记录尚未完整保存，请先点击“保存处理记录”恢复。'),
+        )
+        for blocked, reason_code, message in preconditions:
+            if blocked:
+                self._start_blocked('precondition', reason_code, message)
+                return
+        if not self.check_people(show_dialog=False):
+            self._start_blocked('workbook', 'WORKBOOK_NOT_READY', self.status_var.get())
             return
         if not self.session_ready:
-            self.status_var.set("自动管理未开启。请先点击“登录 / 重新登录”，在浏览器完成登录，再点击“立即读取费用”核验账户与费用。")
+            self._start_blocked('identity', 'SESSION_NOT_VERIFIED',
+                '请先点击“登录 / 重新登录”，在浏览器完成登录，再点击“立即读取费用”核验账户与费用。')
             return
         if not self._collection_is_current():
             if self.start_refresh_required:
                 self._refresh_before_start()
                 return
             self._invalidate_collection()
-            self.status_var.set("自动管理未开启。请先点击“立即读取费用”；读取已过期、跨日或配置已变化时需要重新核验。")
+            self._start_blocked('collection', 'COLLECTION_NOT_CURRENT',
+                '请先点击“立即读取费用”；读取已过期、跨日或配置已变化时需要重新核验。')
             return
         if self.store.unresolved_actions():
-            self.status_var.set('自动管理未开启。请先选中“上次操作待核实”的人员，点击“核实平台状态”。')
+            self._start_blocked('local_responsibility', 'UNRESOLVED_ACTION',
+                '请先选中“上次操作待核实”的人员，点击“核实平台状态”。')
             return
         try:
             self._claim_targets(self.last_keys)
         except GuardError as exc:
-            self.error('自动管理未开启', exc, dialog=False)
+            from .target_lock import TargetLockError
+            self._start_blocked('target_lock',
+                'TARGET_IN_USE' if isinstance(exc, TargetLockError) else 'TARGET_LOCK_FAILED', exc)
             return
         try:
             self.responsibility_gate.reconcile(self.store)
             self.responsibility_gate.check(self.store)
         except GuardError as exc:
-            self.error('自动管理未开启', exc, dialog=False)
+            from .responsibility_registry import RegistryError
+            reason = exc.reason_code if isinstance(exc, RegistryError) else 'RESPONSIBILITY_CHECK_FAILED'
+            message = str(exc)
+            if reason == 'REGISTRY_MISSING':
+                message += ('\n\n如果从未建立过：点击“建立本机责任范围”，纳入当前账本和需要保护的旧账本。'
+                            '\n如果以前建立过：请恢复原登记文件，不要重新创建或清空登记来绕过。'
+                            '\n此处不会自动创建登记，也没有执行任何删除。')
+            self._start_blocked('shared_responsibility', reason, message, dialog=True)
             return
         managed = [p.name for p in self.store.read_people() if p.name and p.amount >= 0]
         fees_note = ("\n当前费用尚未就绪：费用未核验，仅零额度可处理；正额度人员的未知费用不会按零元计算。\n" if not self.collection_has_fees else "")
@@ -1889,6 +2022,7 @@ class App:
         if not messagebox.askyesno('启动全自动管理（含自动撤销）',
             '管理人员：' + '、'.join(managed) + '\n\n本次开启后，达到个人额度或公共额度（含 0 元）时，将自动永久撤销对应 Key，无需逐枚人工审批。-1 和表格外的 Key 不参与。\n'
             '撤销不可恢复；账单延迟与在途请求可能导致超支。身份、表格、页面结构或结果无法核实时会停止；结果不明不会自动重试。' + fees_note + '\n\n启动本次全自动管理？', parent=self.root):
+            self._start_blocked('confirmation', 'START_CANCELLED', '已取消本次启动。')
             return
         # A modal dialog runs a nested Tk loop. A stop, login, ledger switch or
         # changed workbook during confirmation invalidates this start request.
@@ -1896,25 +2030,31 @@ class App:
                 or self.recovery_mode or self.busy or self.observing or self.automatic
                 or self.single_revoke_id is not None or self.pending_login or self.pending_change is not None
                 or self.closing or self.interrupting or self.cleanup_failed or self.audit_failed):
+            self._start_blocked('confirmation', 'START_CONTEXT_CHANGED',
+                '确认期间操作状态发生变化，请完成当前操作后重新启动。')
             return
         try:
             if (not self.session_ready or self.collection_context != confirmation_context
                     or not self._collection_is_current() or self.validated_hash != confirmation_hash
                     or self.store.workbook_hash() != confirmation_hash):
                 self._invalidate_collection()
-                self.status_var.set('自动管理未开启：确认期间身份、人员表或费用核验发生变化，请重新读取后启动。')
+                self._start_blocked('confirmation', 'START_EVIDENCE_CHANGED',
+                    '确认期间身份、人员表或费用核验发生变化，请重新读取后启动。')
                 return
             if self.store.unresolved_actions():
-                self.status_var.set('自动管理未开启：确认期间出现待核实操作，请先核实平台状态。')
+                self._start_blocked('confirmation', 'UNRESOLVED_ACTION',
+                    '确认期间出现待核实操作，请先核实平台状态。')
                 return
             self._claim_targets(self.last_keys)
         except Exception as exc:
-            self.error('自动管理未开启', exc, dialog=False)
+            self._start_blocked('confirmation', 'START_RECHECK_FAILED', exc)
             return
         self.observing = True
         self.automatic = True
         self.management_generation += 1
         self.action_states.pop("stop", None)
+        self.action_states.pop("start", None)
+        self._diagnostic('start_completed', stage='activation', reason_code='OK')
         self.status_var.set("全自动管理已开启（含自动撤销，无需逐枚人工审批），正在检查当前额度。" + f"每轮处理完成后等待 {self.poll_interval_seconds} 秒再读取。")
         self._update_buttons()
         self._schedule_processing()
@@ -1928,11 +2068,11 @@ class App:
         if self.pending_start is not None:
             return
         if self.store.unresolved_actions():
-            self.status_var.set('自动管理未开启。请先核实上次操作的结果，再启动。')
+            self._start_blocked('refresh', 'UNRESOLVED_ACTION', '请先核实上次操作的结果，再启动。')
             self._diagnostic('start_refresh_blocked', reason_code='UNRESOLVED_ACTION')
             return
         if self.browser is None or getattr(self.browser, 'closed', False):
-            self.status_var.set('自动管理未开启。浏览器会话已关闭，请先登录并读取费用。')
+            self._start_blocked('refresh', 'BROWSER_SESSION_CLOSED', '浏览器会话已关闭，请先登录并读取费用。')
             return
         token = object()
         store = self.store
@@ -1958,12 +2098,14 @@ class App:
                          and self._collection_context() == context and self._collection_is_current())
                 if not valid:
                     self._diagnostic('start_refresh_discarded', reason_code='CONTEXT_CHANGED')
+                    self._start_blocked('refresh', 'START_CONTEXT_CHANGED',
+                        '重新读取期间操作状态发生变化，请完成当前操作后重新启动。')
                     return
                 self._diagnostic('start_refresh_ready')
                 self.start()
             except Exception as exc:
                 self.stop(quiet=True)
-                self.error('自动管理未开启', exc, dialog=False)
+                self._start_blocked('refresh', 'START_REFRESH_FAILED', exc)
 
         try:
             self.collect(after_read=resume)
@@ -1973,7 +2115,7 @@ class App:
             if self.pending_start is token:
                 self.pending_start = None
                 self._update_buttons()
-            self.error('自动管理未开启', exc, dialog=False)
+            self._start_blocked('refresh', 'START_REFRESH_FAILED', exc)
             return
         if self.busy and self.pending_start is token:
             self.status_var.set('强制删除后需要更新 Key 列表与费用，正在使用当前登录会话重新读取；完成后再确认启动。可点击“停止管理”取消后续启动。')

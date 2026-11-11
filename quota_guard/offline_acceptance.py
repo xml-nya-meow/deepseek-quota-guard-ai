@@ -57,10 +57,16 @@ class _Transport:
         if action == 'collect':
             ids = [k['tracking_id'] for k in self.inventory if k['name'] in kwargs['managed_names']]
             today = self.store.load().start_date
-            future.set_result({'keys': list(self.inventory), 'account_id': self.account,
+            result = {'keys': list(self.inventory), 'account_id': self.account,
                 'totals': {key: self.cost for key in ids}, 'requested_tracking_ids': ids,
                 'source_id': 'offline-acceptance-fixture', 'start_date': today, 'end_date': today,
-                'collection_started_wall': time.time(), 'collection_started_monotonic': time.monotonic()})
+                'collection_started_wall': time.time(), 'collection_started_monotonic': time.monotonic()}
+            if kwargs.get('fee_basis') == 'key_lifetime':
+                created = int(datetime.fromisoformat(today).replace(tzinfo=TZ).timestamp()) - 86400
+                result.update(fee_basis='key_lifetime', key_periods={key: {
+                    'created_at': created, 'start_date': datetime.fromtimestamp(created, TZ).date().isoformat(),
+                    'end_date': today} for key in ids})
+            future.set_result(result)
         elif action == 'read_keys':
             future.set_result({'keys': list(self.inventory), 'account_id': self.account})
         elif action == 'revoke':
@@ -158,7 +164,7 @@ def _exercise(base, report):
     stores = []
     for label in ('X', 'Y'):
         store = DataStore(base / label)
-        store.initialize(14, '1500', datetime.now(TZ).date().isoformat())
+        store.initialize(14, '1500', datetime.now(TZ).date().isoformat(), fee_basis='key_lifetime')
         stores.append(store)
     first, second = stores
     driver = _Driver(first, registry, keys, account)

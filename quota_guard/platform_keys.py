@@ -342,7 +342,7 @@ class ConsoleKeyManager:
         except GuardError:
             raise KeyPreparationError('KEY_DIAGNOSTIC_FAILED') from None
 
-    def prepare(self, page):
+    def prepare(self, page, *, allow_cost_fallback=True):
         self.failure_reason = None
         if (page.context is not self._context
                 or self._capture_depth and page is not self._capture_page):
@@ -357,7 +357,10 @@ class ConsoleKeyManager:
                 # fresh known cost GET supply headers. This is not evidence of
                 # delete permission: read_target must still verify the Key GET
                 # contract and the caller must independently verify the DOM.
-                for source, destination in (('key_list', PAGE_URL), ('cost_read', USAGE_PAGE_URL)):
+                routes = [('key_list', PAGE_URL)]
+                if allow_cost_fallback:
+                    routes.append(('cost_read', USAGE_PAGE_URL))
+                for source, destination in routes:
                     phase_deadline = (min(deadline, time.monotonic() + LIST_BOOTSTRAP_MS / 1000)
                                       if source == 'key_list' else deadline)
                     if source != self._bootstrap_source:
@@ -413,7 +416,7 @@ class ConsoleKeyManager:
                     self._report('key_http_bootstrap_unavailable', phase=source, channel='console_http',
                                  reason_code=unavailable, count=self._matched_count)
                     # Do not hide rejected headers by trying a different source.
-                    if self._matched_count or source == 'cost_read':
+                    if self._matched_count or source == 'cost_read' or not allow_cost_fallback:
                         raise KeyPreparationError(unavailable)
         except Exception as exc:
             error = self._preparation_failure(exc.reason_code if isinstance(exc, KeyPreparationError) else reason)
@@ -554,6 +557,47 @@ class ConsoleKeyManager:
             self._app_managed_names.clear()
             raise
         return result
+
+    def read_creation_times(self, expected_keys, tracking_ids, *, observed_wall):
+        """Read billing origins only; never require secrets or issue a target.
+
+        A complete identity list is checked against this observation's DOM.
+        Only selected ordinary keys need creation metadata. App-managed and
+        unknown bystanders remain identity anchors without affecting billing.
+        """
+        self._issued = None
+        if (not isinstance(expected_keys, (list, tuple)) or not expected_keys
+                or not isinstance(tracking_ids, (list, tuple, set, frozenset))
+                or not tracking_ids or len(set(tracking_ids)) != len(tracking_ids)
+                or type(observed_wall) not in (int, float)):
+            raise KeyReadError('KEY_EXPECTED_LIST_INVALID')
+        expected = [_identity(item) for item in expected_keys]
+        names = {tracking: name for name, tracking in expected}
+        if (len({tracking.lower() for tracking in names}) != len(expected)
+                or not set(tracking_ids).issubset(names)):
+            raise KeyReadError('KEY_EXPECTED_LIST_INVALID')
+        entries = self._read_inventory()
+        if len(entries) != len(names) or any(
+                not (isinstance(names.get(item.tracking_id), str)
+                     and _DSH_DISPLAY.fullmatch(names[item.tracking_id]))
+                if item.kind == 'DSH' else names.get(item.tracking_id) != item.name
+                for item in entries):
+            raise KeyReadError('KEY_LIST_IDENTITY_MISMATCH')
+        selected = set(tracking_ids)
+        origins = {}
+        for item in entries:
+            if item.tracking_id not in selected:
+                continue
+            if item.kind != 'NORMAL':
+                raise KeyReadError('KEY_TARGET_KIND_UNSUPPORTED')
+            stamp = item.row.get('created_at')
+            if type(stamp) is not int or not 0 < stamp <= observed_wall:
+                self._read_rejected('KEY_CREATED_AT_INVALID', entry=item,
+                                    selected_id=item.tracking_id)
+                raise KeyReadError('KEY_CREATED_AT_INVALID')
+            origins[item.tracking_id] = stamp
+        self._report('key_creation_metadata_verified', key_count=len(entries), count=len(origins))
+        return origins
 
     def _report_entry_shapes(self, entries, expected_names, selected_id):
         # Full IDs are compared only in memory. Ordinals are local aliases for

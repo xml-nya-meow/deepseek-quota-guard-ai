@@ -1,2 +1,2 @@
 """Windows quota management application."""
-__version__ = '0.2.0a2.dev2'
+__version__ = '0.2.0a2.dev3'

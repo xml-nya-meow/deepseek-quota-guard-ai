@@ -531,7 +531,8 @@ class BrowserService:
         self.known_keys = {key['tracking_id'] for key in keys}
         return {'keys': keys, 'account_id': identity}
 
-    def _collect(self, start_date, account_id='', known_keys=(), operation_id='', managed_names=None):
+    def _collect(self, start_date, account_id='', known_keys=(), operation_id='', managed_names=None,
+                 fee_basis='period'):
         # GUI collection always supplies the validated roster scope. None is
         # retained only for legacy/offline adapter callers, never as a fallback.
         if managed_names is not None:
@@ -540,6 +541,13 @@ class BrowserService:
                            for name in managed_names)
                     or len(set(managed_names)) != len(managed_names)):
                 raise GuardError('费用读取没有明确且唯一的受管名单，未发送费用请求。')
+        if fee_basis == 'key_lifetime':
+            if managed_names is None:
+                raise GuardError('创建以来费用读取必须提供明确受管名单。')
+            return self._collect_lifetime(start_date, account_id, known_keys,
+                                          operation_id, managed_names)
+        if fee_basis != 'period':
+            raise GuardError('费用统计口径无效，未发送费用请求。')
         self._check_login_ready()
         started_wall, started_monotonic = time.time(), time.monotonic()
         keys = self._keys()
@@ -627,6 +635,106 @@ class BrowserService:
             reader.clear()
             raise GuardError('读取费用期间 Key 列表发生变化，本次结果未应用。')
         return result
+
+    def _collect_lifetime(self, ledger_start, account_id, known_keys, operation_id, managed_names):
+        """Creation-origin billing, bound to fresh HTTP and DOM identities.
+
+        ledger_start is only the unchanged local ledger context. Each key's
+        actual HTTP period is carried explicitly in key_periods, never inferred
+        from that date or silently replaced by the page's default time range.
+        """
+        from .lifetime_costs import creation_periods, read_lifetime_costs
+        from .platform_keys import ConsoleKeyManager, KeyPreparationError, KeyReadError
+        self._check_login_ready()
+        started_wall, started_monotonic = time.time(), time.monotonic()
+        end = datetime.now(TZ).date().isoformat()
+        manager = ConsoleKeyManager(self.context, emit=self._log)
+        try:
+            with manager.capture(self.page):
+                keys = self._keys()
+                if not keys:
+                    raise GuardError('平台没有可绑定的 Key；无法确认当前账户。')
+                identity = check_identity(keys, account_id, known_keys)
+                self.anchor = key_fingerprint(keys)
+                self.known_keys = {key['tracking_id'] for key in keys}
+                selected = []
+                for name in managed_names:
+                    matches = [key['tracking_id'] for key in keys if key['name'] == name]
+                    if len(matches) > 1:
+                        raise GuardError('受管姓名在平台对应多个 Key，未发送费用请求。')
+                    selected.extend(matches)
+                result = {'keys': keys, 'account_id': identity, 'totals': None,
+                    'start_date': ledger_start, 'end_date': end, 'source_id': '',
+                    'fee_basis': 'key_lifetime', 'key_periods': {},
+                    'requested_tracking_ids': selected, 'reason_code': 'NOT_COLLECTED',
+                    'retryable': False, 'collection_started_wall': started_wall,
+                    'collection_started_monotonic': started_monotonic,
+                    'message': '正在核验受管 Key 的创建日期及创建以来费用。'}
+                self._log('cost_scope_selected', count=len(selected), scope_kind='managed_keys',
+                          fee_basis='key_lifetime', operation_id=operation_id)
+                if not selected:
+                    result.update(reason_code='NO_MANAGED_KEYS', message='本次没有可查询的受管 Key，未发送费用请求。')
+                    return result
+                reader = getattr(self, '_cost_reader', None)
+                if reader is not None and getattr(self, '_cost_reader_identity', None) != identity:
+                    reader.clear()
+                    reader = None
+                if reader is None:
+                    reader = self._cost_reader = ConsoleCostReader(self.context, emit=self._log)
+                    self._cost_reader_identity = identity
+                try:
+                    self._stage('正在只读核验受管 Key 的创建日期')
+                    # This metadata read must never visit account-wide usage.
+                    manager.prepare(self.page, allow_cost_fallback=False)
+                    origins = manager.read_creation_times(keys, selected, observed_wall=started_wall)
+                    periods = creation_periods(origins, end, started_wall)
+                    self._stage('正在建立本次登录的费用接口会话')
+                    reader.prepare(self.page, tracking_ids=selected)
+                    self._stage('正在分段读取每枚 Key 创建以来的费用')
+                    try:
+                        totals, source = read_lifetime_costs(reader, periods, emit=self._log,
+                                                           started_monotonic=started_monotonic)
+                    except CostReadError as exc:
+                        if exc.reason_code != 'LIFETIME_PERIOD_INCOMPLETE':
+                            raise
+                        # Even an empty report needs final creation/identity
+                        # evidence before the GUI may retain identity-only state.
+                        totals, source = None, ''
+                    self._stage('正在复核费用期间的 Key 身份与创建日期')
+                    after_origins = manager.read_creation_times(keys, selected, observed_wall=started_wall)
+                    if after_origins != origins or key_fingerprint(self._keys()) != self.anchor:
+                        raise CostReadError('读取期间 Key 身份或创建日期发生变化，本次结果未应用。',
+                                            reason_code='LIFETIME_IDENTITY_CHANGED', retryable=True)
+                    result['key_periods'] = periods
+                    if totals is None:
+                        raise CostReadError('受管 Key 创建以来费用尚无完整分段证据；未知时段未按零元计算。',
+                                            reason_code='LIFETIME_PERIOD_INCOMPLETE', retryable=True)
+                    result.update(totals=totals, source_id=source, reason_code='OK',
+                        coverage_summary=cost_identity_coverage(keys, totals),
+                        message='已核验每枚受管 Key 创建以来的费用；缺少完整分段证据的 Key 仍为未知。')
+                    self._log('costs_verified', cost_count=len(totals), fee_basis='key_lifetime',
+                              end_date=end, totals_available=True, source_id=source, reason_code='OK')
+                except (KeyPreparationError, KeyReadError) as exc:
+                    reason = ('LIFETIME_SCOPE_UNSUPPORTED' if getattr(exc, 'reason_code', '')
+                              in {'KEY_TARGET_KIND_UNSUPPORTED', 'KEY_TARGET_NOT_DELETABLE'}
+                              else 'LIFETIME_METADATA_INVALID')
+                    result.update(reason_code=reason,
+                                  message='未取得与完整平台列表一致的普通 Key 创建日期，未应用创建以来费用。')
+                    reader.clear()
+                    self._log('cost_collection_rejected', reason_code=reason,
+                              metadata_reason_code=getattr(exc, 'reason_code', ''),
+                              fee_basis='key_lifetime', end_date=end)
+                except CostReadError as exc:
+                    result.update(reason_code=exc.reason_code, retryable=exc.retryable, message=str(exc))
+                    if exc.reason_code != 'LIFETIME_PERIOD_INCOMPLETE':
+                        result['key_periods'] = {}
+                    if exc.reason_code in {'PLATFORM_REJECTED', 'LIFETIME_IDENTITY_CHANGED'}:
+                        reader.clear()
+                    self._log('cost_collection_rejected', reason_code=exc.reason_code,
+                              retryable=exc.retryable, fee_basis='key_lifetime', end_date=end)
+                return result
+        finally:
+            manager.clear()
 
     def _prepare_revoke(self, name, tracking_id):
         keys = self._keys()

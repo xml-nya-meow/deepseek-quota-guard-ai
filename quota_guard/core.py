@@ -26,6 +26,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 TZ = timezone(timedelta(hours=8))
 HEADERS = ("API名/人员名", "个人金额（元）")
 SCHEMA = 2
+LIFETIME_SCHEMA = 3
 _UNRESOLVED_ACTIONS = {"pending", "prepared", "requested", "unknown_result", "unknown", "failed", "confirmed",
                        "observation_failed"}
 _LEGACY_READ_ONLY_INTENT = "用户请求只读核实平台状态；未授权或提交撤销"
@@ -109,6 +110,49 @@ def _date(value: str) -> str:
     return result.isoformat()
 
 
+def _fee_basis(value: str) -> str:
+    if value not in ('period', 'key_lifetime'):
+        raise GuardError('费用统计口径无效，请恢复原设置。')
+    return value
+
+
+def validate_key_periods(value, *, end_date: str, expected_ids=None, now=None) -> dict:
+    """Validate per-Key creation evidence independently of ledger start_date."""
+    if not isinstance(value, dict) or not value or len(value) > 10000:
+        raise GuardError('创建以来费用缺少逐 Key 时间范围。')
+    now = datetime.now(TZ) if now is None else now
+    end_date = _date(end_date)
+    if (not isinstance(now, datetime) or now.tzinfo is None
+            or end_date > now.astimezone(TZ).date().isoformat()):
+        raise GuardError('创建以来费用的截止日期或核验时钟无效。')
+    result = {}
+    for key, period in value.items():
+        if (not isinstance(period, dict)
+                or set(period) != {'created_at', 'start_date', 'end_date'}):
+            raise GuardError('逐 Key 时间范围结构无效。')
+        identity = _identifier(key)
+        created_at = period['created_at']
+        if type(created_at) is not int or not 0 < created_at <= int(now.timestamp()):
+            raise GuardError('Key 创建时间无效或晚于当前时间。')
+        try:
+            creation_day = datetime.fromtimestamp(created_at, TZ).date().isoformat()
+        except (ValueError, OverflowError, OSError):
+            raise GuardError('Key 创建时间无法转换为 UTC+8 日期。') from None
+        if (period['start_date'] != creation_day or period['end_date'] != end_date
+                or creation_day > end_date):
+            raise GuardError('逐 Key 查询期间与创建日期或本次截止日期不一致。')
+        result[identity] = dict(period)
+    if len(result) != len(value):
+        raise GuardError('逐 Key 时间范围身份重复。')
+    if expected_ids is not None:
+        if not isinstance(expected_ids, (list, tuple, set, frozenset)):
+            raise GuardError('逐 Key 时间范围的预期身份集合无效。')
+        expected = {_identifier(key) for key in expected_ids}
+        if len(expected) != len(expected_ids) or set(result) != expected:
+            raise GuardError('逐 Key 时间范围未精确覆盖本次受管目标。')
+    return result
+
+
 def _identifier(value: str) -> str:
     if not isinstance(value, str) or not value.strip() or len(value) > 200:
         raise GuardError("缺少有效的身份标识。")
@@ -142,6 +186,7 @@ class Config:
     total_budget: Decimal
     start_date: str
     account_id: str = ""
+    fee_basis: str = 'period'
 
     @property
     def share(self) -> Decimal:
@@ -170,7 +215,8 @@ class DataStore:
                     self.DATABASE + "-shm", self.MARKER)) or any(
                        self.folder.glob("运行日志-*.jsonl")) or any(self.folder.glob("运行摘要-*.txt"))
 
-    def initialize(self, people_count: int, total_budget, start_date: str, *, initial_amount=-1) -> Config:
+    def initialize(self, people_count: int, total_budget, start_date: str, *, initial_amount=-1,
+                   fee_basis='period') -> Config:
         if isinstance(people_count, bool) or not isinstance(people_count, int) or not 1 <= people_count <= 10000:
             raise GuardError("人数必须是 1 到 10000 的整数。")
         budget = money(total_budget)
@@ -180,7 +226,7 @@ class DataStore:
             raise GuardError("统计开始日期不能晚于今天。")
         if self.has_history():
             raise GuardError("此目录已有设置或历史，请打开/恢复原数据，不能重新初始化清零。")
-        config = Config(str(uuid4()), people_count, budget, start)
+        config = Config(str(uuid4()), people_count, budget, start, fee_basis=_fee_basis(fee_basis))
         self.folder.mkdir(parents=True, exist_ok=True)
         marker = self.folder / self.MARKER
         try:
@@ -203,7 +249,7 @@ class DataStore:
                     db.execute("INSERT INTO meta VALUES (?,?)", (key, str(value)))
                 self._event(db, "initialized", {"people_count": people_count,
                     "total_budget": str(budget), "share": str(config.share), "start_date": start,
-                    "initial_amount": str(default_amount)})
+                    "initial_amount": str(default_amount), "fee_basis": config.fee_basis})
             self._write_json(self.config_path, self._config_dict(config))
             self._write_workbook([Person("", default_amount) for _ in range(people_count)])
             marker.unlink()
@@ -214,7 +260,8 @@ class DataStore:
 
     @staticmethod
     def _config_dict(config: Config) -> dict:
-        return {"schema": SCHEMA, "period_id": config.period_id,
+        return {"schema": LIFETIME_SCHEMA if config.fee_basis == 'key_lifetime' else SCHEMA,
+                "period_id": config.period_id, "fee_basis": config.fee_basis,
                 "people_count": config.people_count, "total_budget": str(config.total_budget),
                 "start_date": config.start_date, "account_id": config.account_id,
                 "comparison": ">=", "share_rounding": "floor_yuan", "timezone": "UTC+08:00"}
@@ -228,7 +275,9 @@ class DataStore:
             raise GuardError("设置、表格或统计文件缺失，请恢复原文件，不会自动新建周期。")
         try:
             raw = json.loads(self.config_path.read_text(encoding="utf-8"))
-            if raw.get("schema") != SCHEMA or raw.get("comparison") != ">=" or raw.get("share_rounding") != "floor_yuan":
+            basis = _fee_basis(raw.get('fee_basis', 'period'))
+            expected_schema = LIFETIME_SCHEMA if basis == 'key_lifetime' else SCHEMA
+            if raw.get("schema") != expected_schema or raw.get("comparison") != ">=" or raw.get("share_rounding") != "floor_yuan":
                 raise GuardError("设置版本或规则不匹配，请恢复正确设置。")
             n = raw["people_count"]
             if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= 10000:
@@ -237,7 +286,7 @@ class DataStore:
             if legacy_account != "":
                 legacy_account = _identifier(legacy_account)
             config = Config(_identifier(raw["period_id"]), n, money(raw["total_budget"]),
-                            _date(raw["start_date"]))
+                            _date(raw["start_date"]), fee_basis=basis)
             with self._connect() as db:
                 if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
                     raise GuardError("统计库损坏，请恢复备份。")
@@ -245,7 +294,8 @@ class DataStore:
                 for key, value in self._config_dict(config).items():
                     if key == "account_id":
                         continue
-                    if stored.get(key) != str(value):
+                    stored_value = stored.get(key, 'period' if key == 'fee_basis' else None)
+                    if stored_value != str(value):
                         raise GuardError("设置与统计库不匹配，请恢复同一周期的一套文件。")
                 # Account identity lives in SQLite, in the same transaction as
                 # binding or correcting an unused setup. Old nonempty JSON copies
@@ -255,7 +305,7 @@ class DataStore:
                     account = _identifier(account)
                 if legacy_account and legacy_account != account:
                     raise GuardError("设置与统计库的账户不匹配，请恢复同一周期的一套文件。")
-                config = Config(config.period_id, n, config.total_budget, config.start_date, account)
+                config = Config(config.period_id, n, config.total_budget, config.start_date, account, basis)
             return config
         except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as exc:
             if isinstance(exc, GuardError):
@@ -440,6 +490,45 @@ class DataStore:
         return {person: tuple(bindings) for person, bindings in scopes.items()}
 
     @staticmethod
+    def _lifetime_creation_times(db, required):
+        row = db.execute("SELECT value FROM meta WHERE key='key_creation_times'").fetchone()
+        try:
+            values = json.loads(row[0]) if row else {}
+            cost_ids = {key for (key,) in db.execute('SELECT tracking_id FROM costs')}
+            if (not isinstance(values, dict) or not set(values).issubset(required)
+                    or not cost_ids.issubset(values)
+                    or any(type(value) is not int or not 0 < value <= 253402300799
+                           for value in values.values())):
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise GuardError('已有 Key 创建日期证据缺失或损坏，不能覆盖或重新推断。') from None
+        return values
+
+    def validate_lifetime_observation(self, key_periods, *, end_date, expected_ids):
+        """Read-only creation continuity check, also for identity-only reads.
+
+        No snapshot or creation witness is manufactured when fees are missing.
+        The same checks repeat inside the eventual fee write transaction.
+        """
+        if self.load().fee_basis != 'key_lifetime':
+            raise GuardError('当前账本不是创建以来累计口径。')
+        periods = validate_key_periods(key_periods, end_date=end_date, expected_ids=expected_ids)
+        people = self.read_people()
+        managed_names = {p.name for p in people if p.name and p.amount >= 0}
+        with self._connect() as db:
+            db.execute('BEGIN')
+            bindings = list(db.execute('SELECT tracking_id,person,active FROM bindings'))
+            required = {key for key, _, _ in bindings}
+            managed_ids = {key for key, name, active in bindings if active and name in managed_names}
+            if not set(periods).issubset(managed_ids):
+                raise GuardError('创建日期证据包含当前未参与管理的 Key。')
+            previous = self._lifetime_creation_times(db, required)
+            if any(key in previous and previous[key] != period['created_at']
+                   for key, period in periods.items()):
+                raise GuardError('同一 Tracking ID 的创建时间发生变化，请核对原始证据。')
+        return periods
+
+    @staticmethod
     def _operation_recovery_evidence(operation: list[dict], *, tracking_id: str, account_id: str):
         """Recover one immutable context, never merge inventories across operations."""
         from .recovery_evidence import validate_recovery_evidence
@@ -614,6 +703,8 @@ class DataStore:
 
     def update_start_date(self, start_date: str, destination: Path) -> DataStore:
         """Use a new ledger for a changed range; the original stays untouched."""
+        if self.load().fee_basis != 'period':
+            raise GuardError('创建以来累计不使用统一统计起点；请保留当前账本及逐 Key 创建日期。')
         start = _date(start_date)
         if start > datetime.now(TZ).date().isoformat():
             raise GuardError("统计开始日期不能晚于今天。")
@@ -622,7 +713,8 @@ class DataStore:
         return self.create_successor(destination, start, keep_account=True)
 
     def create_list(self, destination: Path, people_count: int, total_budget,
-                    start_date: str, *, inherit_people: bool = True, initial_amount=-1) -> DataStore:
+                    start_date: str, *, inherit_people: bool = True, initial_amount=-1,
+                    fee_basis=None) -> DataStore:
         """Create an independent list while retaining this account's obligations.
 
         A blank roster is not a new account: existing identity, retirement and
@@ -632,11 +724,12 @@ class DataStore:
             raise GuardError("人数必须是 1 到 10000 的整数。")
         return self.create_successor(destination, _date(start_date), keep_account=True,
             people_count=people_count, total_budget=money(total_budget), inherit_people=inherit_people,
-            initial_amount=initial_amount)
+            initial_amount=initial_amount, fee_basis=fee_basis)
 
     def create_successor(self, destination: Path, start_date: str | None = None,
                          *, keep_account: bool = False, people_count: int | None = None,
-                         total_budget=None, inherit_people: bool = True, initial_amount=-1) -> DataStore:
+                         total_budget=None, inherit_people: bool = True, initial_amount=-1,
+                         fee_basis=None) -> DataStore:
         """Publish a complete new period without editing or moving the old one.
 
         The UI supplies a fresh destination and switches only after this returns.
@@ -644,6 +737,7 @@ class DataStore:
         costs or snapshots. Other-account successors have no inherited bindings.
         """
         config = self.load()
+        basis = config.fee_basis if fee_basis is None else _fee_basis(fee_basis)
         count = config.people_count if people_count is None else people_count
         if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 10000:
             raise GuardError("人数必须是 1 到 10000 的整数。")
@@ -706,17 +800,25 @@ class DataStore:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 stage = Path(tempfile.mkdtemp(prefix=".new-ledger-", dir=target.parent)).resolve()
                 successor = DataStore(stage)
-                successor.initialize(count, budget, start, initial_amount=default_amount)
+                successor.initialize(count, budget, start, initial_amount=default_amount, fee_basis=basis)
                 with successor._connect() as new_db:
                     new_db.execute("BEGIN IMMEDIATE")
                     if keep_account:
                         new_db.execute("UPDATE meta SET value=? WHERE key='account_id'", (config.account_id,))
                         new_db.executemany("INSERT INTO bindings VALUES (?,?,?)", bindings)
+                        # Creation identity outlives a fee basis. Switching via
+                        # a period ledger must not erase a previously observed
+                        # creation timestamp for the same Tracking ID.
+                        creation_times = source_db.execute(
+                            "SELECT value FROM meta WHERE key='key_creation_times'").fetchone()
+                        if creation_times:
+                            new_db.execute("INSERT INTO meta VALUES ('key_creation_times',?)", creation_times)
                         for action in sorted(actions.values(), key=lambda value: value["original_event_id"]):
                             self._event(new_db, "action", action)
                     self._event(new_db, "successor_created", {"previous_period_id": config.period_id,
                         "previous_folder": str(self.folder), "previous_start_date": config.start_date,
                         "start_date": start, "keep_account": keep_account,
+                        "previous_fee_basis": config.fee_basis, "fee_basis": basis,
                         "inherit_people": inherit_people, "initial_amount": str(default_amount),
                         "inherited_binding_count": len(bindings), "inherited_action_count": len(actions)})
                 successor.save_people(people, allow_unassigned=True)
@@ -839,12 +941,14 @@ class DataStore:
         self.export_logs()
 
     def apply_snapshot(self, totals: dict[str, Decimal], source_id: str,
-                       start_date: str, end_date: str) -> list[dict]:
+                       start_date: str, end_date: str, *, fee_basis='period', key_periods=None) -> list[dict]:
         """Compatibility entry point. GUI callers also need the source outcome."""
-        return self.apply_snapshot_result(totals, source_id, start_date, end_date).rows
+        return self.apply_snapshot_result(totals, source_id, start_date, end_date,
+                                          fee_basis=fee_basis, key_periods=key_periods).rows
 
     def apply_snapshot_result(self, totals: dict[str, Decimal], source_id: str,
-                              start_date: str, end_date: str, *, operation_id="") -> SnapshotApplyResult:
+                              start_date: str, end_date: str, *, operation_id="",
+                              fee_basis='period', key_periods=None) -> SnapshotApplyResult:
         coverage = {}
 
         def rejected(message, code, *, stage="snapshot_validation", state="not_written"):
@@ -862,7 +966,21 @@ class DataStore:
         except GuardError:
             raise rejected("账单日期无效，未应用本次费用。", "PERIOD_CONFIG_MISMATCH") from None
         if start != config.start_date or end < start or end > datetime.now(TZ).date().isoformat():
-            raise rejected("账单时间范围错误，必须从本期起点开始且不晚于今天。", "PERIOD_CONFIG_MISMATCH")
+            message = ('费用的账本日期上下文或截止日期错误，未应用本次费用。'
+                       if config.fee_basis == 'key_lifetime' else
+                       '账单时间范围错误，必须从本期起点开始且不晚于今天。')
+            raise rejected(message, "PERIOD_CONFIG_MISMATCH")
+        if fee_basis != config.fee_basis:
+            raise rejected('返回费用与当前账本统计口径不同，未应用本次费用。', 'FEE_BASIS_MISMATCH')
+        periods = None
+        if fee_basis == 'key_lifetime':
+            try:
+                periods = validate_key_periods(key_periods, end_date=end)
+            except GuardError:
+                raise rejected('创建以来费用缺少有效且一致的逐 Key 时间证据。',
+                               'LIFETIME_PERIOD_INVALID') from None
+        elif key_periods is not None:
+            raise rejected('本期费用不能混入创建以来的时间证据。', 'FEE_BASIS_MISMATCH')
         if not config.account_id:
             raise rejected("请先绑定已核实的平台账户及人员 Key。", "ACCOUNT_NOT_BOUND")
         try:
@@ -872,8 +990,14 @@ class DataStore:
             raise rejected("费用标识或金额无效，未应用本次费用。", "SNAPSHOT_DATA_INVALID") from None
         if len(normalized) != len(totals):
             raise rejected("账单存在重复的 Tracking ID，请核对来源。", "SNAPSHOT_DATA_INVALID")
-        digest = sha256(json.dumps({"start": start, "end": end,
-            "totals": {k: format(v, "f") for k, v in sorted(normalized.items())}}, sort_keys=True).encode()).hexdigest()
+        if periods is not None and not set(normalized).issubset(periods):
+            raise rejected('部分费用缺少对应 Key 的创建日期证据。', 'LIFETIME_PERIOD_INVALID')
+        # Preserve the old period digest exactly, including replay behavior.
+        digest_data = {"start": start, "end": end,
+                       "totals": {k: format(v, "f") for k, v in sorted(normalized.items())}}
+        if periods is not None:
+            digest_data.update(fee_basis=fee_basis, key_periods=periods)
+        digest = sha256(json.dumps(digest_data, sort_keys=True).encode()).hexdigest()
         try:
             with self._connect() as db:
                 db.execute("BEGIN IMMEDIATE")
@@ -882,6 +1006,20 @@ class DataStore:
                 managed_names = {p.name for p in people if p.name and p.amount >= 0}
                 active_managed = {key for key, name, active in bindings if active and name in managed_names}
                 historical = {key for key, _, active in bindings if not active}
+                creation_times = None
+                if periods is not None:
+                    if not set(periods).issubset(active_managed):
+                        raise rejected('创建日期证据包含当前未参与管理的 Key，未应用费用。',
+                                       'LIFETIME_PERIOD_INVALID')
+                    try:
+                        creation_times = self._lifetime_creation_times(db, required)
+                    except GuardError:
+                        raise rejected('已有 Key 创建日期证据缺失或损坏，未应用费用。',
+                                       'KEY_CREATION_EVIDENCE_INVALID') from None
+                    if any(key in creation_times and creation_times[key] != period['created_at']
+                           for key, period in periods.items()):
+                        raise rejected('同一 Tracking ID 的创建时间发生变化，未覆盖原费用。',
+                                       'KEY_CREATION_CHANGED')
                 received = required.intersection(normalized)
                 coverage.update({
                     "bound_total_count": len(required), "active_managed_count": len(active_managed),
@@ -914,12 +1052,17 @@ class DataStore:
                         db.execute("INSERT INTO costs VALUES (?,?,?) ON CONFLICT(tracking_id) DO UPDATE "
                                     "SET amount=excluded.amount, source_id=excluded.source_id",
                                     (key_id, str(normalized[key_id]), source))
+                    if creation_times is not None:
+                        creation_times.update({key: period['created_at'] for key, period in periods.items()})
+                        db.execute("INSERT OR REPLACE INTO meta VALUES ('key_creation_times',?)",
+                                   (json.dumps(creation_times, sort_keys=True),))
                     db.execute("INSERT INTO snapshots VALUES (?,?,?,?,?)", (source, digest, start, end, _now()))
                     self._event(db, "snapshot", {"source_id": source, "start_date": start,
                         "end_date": end, "tracked_key_count": len(received),
                         "missing_key_count": len(required - received),
                         "schema_version": 1, "timezone": "UTC+08:00", "currency": "CNY",
                         "totals": {key: format(normalized[key], "f") for key in sorted(received)},
+                        **({'fee_basis': fee_basis, 'key_periods': periods} if periods is not None else {}),
                         "coverage": {"scope": "bound_keys", "complete": required == received,
                                      "missing_tracking_ids": sorted(required - received),
                                      "missing_cost": "unknown"}})

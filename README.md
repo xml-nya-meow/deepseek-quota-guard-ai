@@ -1,10 +1,12 @@
 # DeepSeek 额度管理 · 内置本地 AI 版
 
+**开发更新（2026-11-11）：`0.2.0a2.dev3`** 新列表改为每枚受管普通 Key **从创建日期累计至读取当天并持续更新**，旧周期账本通过“统计方式”切换到独立新账本，保留旧数据与未决责任。另修复启动失败只显示在状态栏、诊断缺少原因的问题；责任登记缺失时明确引导首次建立或恢复原登记，不自动重建。见 [本轮改动、验证与未验收事项](docs/dev3-lifetime-progress-20261111.md) 和 [当前使用流程](使用说明.md#dev3-当前操作流程2026-11-11)。下面 `dev2` 数字是历史验证结果，不能充作 dev3 验证；下方旧版 Release 下载未自动升级。
+
 **Windows x64 试用版 `0.2.0a1`** · [下载内置模型的 Windows ZIP](https://github.com/xml-nya-meow/deepseek-quota-guard-ai/releases/tag/v0.2.0a1) · [开发教学](docs/local-ai-guide.md) · [本轮验证与未验收项](docs/ai-first-release.md) · [经典版教学留档](https://github.com/xml-nya-meow/deepseek-quota-guard)
 
 这是一款个人开发的第三方额度工具。**诊断可离线体验，平台管理仍需联网；删除真实 Key 不可恢复。** 新版第一次把本地模型放进便携包，请先用教学示例，不需要账号、Key 或额度。仅部分功能经过验证，整体仍可能有 bug。
 
-**开发进度（2026-11-06）：** 当前开发源码为 `0.2.0a2.dev2`，补充了原操作恢复证据、多 Key 串行候选队列、独立预测记录、跨账本持久责任登记、有充分证据的提交前中断恢复，以及初始化和新增成员的原计划恢复。本轮修复本地恢复失败的错误分类，增加成品离线验收入口，并修复 [浏览器临时路径过长问题](docs/browser-temp-path-progress-20261106.md)。固定实现 `99c3393` 的 **1222 项本地完整回归全部通过、零跳过（427.090 秒）**；[Windows CI](https://github.com/xml-nya-meow/deepseek-quota-guard-ai/actions/runs/42220226688) 成功，1217 项通过，5 项因云端卷无可用短别名而跳过（693.551 秒），这 5 项已在本机通过。新的本地候选 EXE 已完成 GUI、Chromium、本地模型及六项合成业务流程验收，见 [dev1→dev2 验收记录](docs/portable-dev1-acceptance-20261106.md)。**上方 Release 下载仍为 `0.2.0a1`，未自动更新；本候选尚未完成真实平台交付验收，不能据此承诺无人值守投入使用。** 此前改造见 [调度记录](docs/recovery-scheduler-offline-20261106.md)、[持久责任历程](docs/persistent-responsibility-progress-20261106.md)、[提交前恢复](docs/declared-recovery-progress-20261106.md) 与 [成员恢复](docs/membership-recovery-progress-20261106.md)。
+**历史进度（2026-11-06）：** 当时开发源码为 `0.2.0a2.dev2`，补充了原操作恢复证据、多 Key 串行候选队列、独立预测记录、跨账本持久责任登记、有充分证据的提交前中断恢复，以及初始化和新增成员的原计划恢复。本轮修复本地恢复失败的错误分类，增加成品离线验收入口，并修复 [浏览器临时路径过长问题](docs/browser-temp-path-progress-20261106.md)。固定实现 `99c3393` 的 **1222 项本地完整回归全部通过、零跳过（427.090 秒）**；[Windows CI](https://github.com/xml-nya-meow/deepseek-quota-guard-ai/actions/runs/42220226688) 成功，1217 项通过，5 项因云端卷无可用短别名而跳过（693.551 秒），这 5 项已在本机通过。新的本地候选 EXE 已完成 GUI、Chromium、本地模型及六项合成业务流程验收，见 [dev1→dev2 验收记录](docs/portable-dev1-acceptance-20261106.md)。**上方 Release 下载仍为 `0.2.0a1`，未自动更新；本候选尚未完成真实平台交付验收，不能据此承诺无人值守投入使用。** 此前改造见 [调度记录](docs/recovery-scheduler-offline-20261106.md)、[持久责任历程](docs/persistent-responsibility-progress-20261106.md)、[提交前恢复](docs/declared-recovery-progress-20261106.md) 与 [成员恢复](docs/membership-recovery-progress-20261106.md)。
 
 **本轮修复与限制：** 原账本仍有未知撤销结果时，另一独立账本曾可在原窗口退出后创建新操作。持久登记已阻止此路径，原操作核清后可正常继续。新协议还支持恢复“已占槽但 pending 未保存”及“requested 已保存、但尚未跨过发送边界”的中断；恢复保留原操作证据，不重发删除。初始化和新增成员现在先保存完整原计划，再更新成员；中断后仅在原路径、身份、历史和精确前后状态可核验时继续。成员恢复完成不等于旧未决已经结清。首次仍需声明纳入的旧账本，不增加逐 Key 审批。没有完整计划的旧迁移、无法证明的旧未决、成员丢失和跨文件失配仍可能阻断；整体历史共同回滚、旧客户端、跨用户或设备不在保证范围。开发备份不代表可投入使用，详见本轮记录。
 
