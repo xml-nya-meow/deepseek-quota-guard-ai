@@ -1,0 +1,94 @@
+{
+  "initial_keys": [
+    {
+      "name": "DeepSeek Harness",
+      "tracking_id": "00000000-0000-0000-0000-0000000c5c77",
+      "sensitive_id": "",
+      "created_at": 1794499200,
+      "last_use": null,
+      "key_type": "DSH"
+    },
+    {
+      "name": "Synthetic target",
+      "tracking_id": "00000000-0000-0000-0000-0000000c5c75",
+      "sensitive_id": "sk-synthetic*****aaaa",
+      "created_at": 1794499200,
+      "last_use": null,
+      "key_type": "NORMAL"
+    },
+    {
+      "name": "Independent control",
+      "tracking_id": "00000000-0000-0000-0000-0000000c5c76",
+      "sensitive_id": "sk-synthetic*****bbbb",
+      "created_at": 1794499200,
+      "last_use": null,
+      "key_type": "NORMAL"
+    }
+  ],
+  "keys": [
+    {
+      "name": "DeepSeek Harness",
+      "tracking_id": "00000000-0000-0000-0000-0000000c5c77",
+      "sensitive_id": "",
+      "created_at": 1794499200,
+      "last_use": null,
+      "key_type": "DSH"
+    },
+    {
+      "name": "Synthetic target",
+      "tracking_id": "00000000-0000-0000-0000-0000000c5c75",
+      "sensitive_id": "sk-synthetic*****aaaa",
+      "created_at": 1794499200,
+      "last_use": null,
+      "key_type": "NORMAL"
+    },
+    {
+      "name": "Independent control",
+      "tracking_id": "00000000-0000-0000-0000-0000000c5c76",
+      "sensitive_id": "sk-synthetic*****bbbb",
+      "created_at": 1794499200,
+      "last_use": null,
+      "key_type": "NORMAL"
+    }
+  ],
+  "events": [
+    {
+      "kind": "page",
+      "monotonic": 130666.312,
+      "path": "/api_keys",
+      "source": "browser"
+    },
+    {
+      "kind": "identity_read",
+      "monotonic": 130666.453,
+      "source": "browser"
+    },
+    {
+      "kind": "page",
+      "monotonic": 130666.5,
+      "path": "/api_keys",
+      "source": "browser"
+    },
+    {
+      "kind": "identity_read",
+      "monotonic": 130666.515,
+      "source": "browser"
+    },
+    {
+      "kind": "identity_read",
+      "monotonic": 130671.437,
+      "source": "api-context"
+    },
+    {
+      "kind": "page",
+      "monotonic": 130671.453,
+      "path": "/usage",
+      "source": "browser"
+    },
+    {
+      "kind": "identity_read",
+      "monotonic": 130671.468,
+      "source": "browser"
+    }
+  ]
+}

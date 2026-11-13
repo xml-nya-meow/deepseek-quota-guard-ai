@@ -1,0 +1,44 @@
+{
+  "diagnostic": "task-shape-diagnostic-r1",
+  "kind": "read_only_local_model",
+  "planned": 8,
+  "seed": 17,
+  "config": {
+    "threads": 4,
+    "context": 8192,
+    "max_output_tokens": 256,
+    "temperature": 0.7,
+    "top_p": 0.8,
+    "top_k": 20,
+    "min_p": 0,
+    "generation_seed": 17,
+    "step_timeout_seconds": 60,
+    "startup_timeout_seconds": 120,
+    "cache_prompt": false
+  },
+  "total_wall_budget_seconds": 600,
+  "decision_budget_seconds": 65,
+  "source_hashes": {
+    "operator_runtime.py": "e3524b71ac84118afef8126b7b6d225bebff7d42b4667608bd5bc5092fe1e7ab",
+    "operator_contract.py": "744d113024d3b0daf13c523504e1ea17b32b04665d594a59a4aa9de51aa70b0d"
+  },
+  "system_sha256": "0fd2c00aa4e94ac0e618f94d2a89c07fcd2fbb3486ad254a630b2418d3d0e93f",
+  "source_trace_sha256": "ff1ab7908096c2d08f24d68aba99898ec502db792b3bb87c8b21e325d9f7ff6c",
+  "runner_sha256": "46e20a29cacb608653e0a5665d774d1c085ad0a176d9f32554b7357bfeddde5c",
+  "history_source": "First history empty. Second reconstructed from captured first action/control and second action_state using unchanged WebOperator.run history assembly; original trace omits explicit history.",
+  "changed_variable": "Only current_task target_ids:[id] versus target_id:id; instruction, observation, all candidates, history, SYSTEM, weights and sampling unchanged.",
+  "order": [
+    "observation-1-array-repeat-1",
+    "observation-1-scalar-repeat-1",
+    "observation-1-scalar-repeat-2",
+    "observation-1-array-repeat-2",
+    "observation-2-array-repeat-1",
+    "observation-2-scalar-repeat-1",
+    "observation-2-scalar-repeat-2",
+    "observation-2-array-repeat-2"
+  ],
+  "browser_executed": false,
+  "external_requests": 0,
+  "platform_cost_requests": 0,
+  "platform_write_requests": 0
+}

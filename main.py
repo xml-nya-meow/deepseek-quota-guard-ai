@@ -14,9 +14,19 @@ def main():
     modes.add_argument('--browser-smoke', action='store_true', help='Check bundled Chromium using about:blank only')
     modes.add_argument('--ai-smoke', action='store_true', help='Run one offline teaching case using the bundled model')
     modes.add_argument('--offline-acceptance', action='store_true', help='Check local workflows with synthetic transport in a NEW offline-acceptance-* directory')
+    modes.add_argument('--operator-acceptance', action='store_true', help='Run bundled 4B/browser offline acceptance in an explicitly new isolated directory')
     args = parser.parse_args()
-    if (args.offline_acceptance or args.smoke) and args.data_dir is None:
+    if (args.offline_acceptance or args.operator_acceptance or args.smoke) and args.data_dir is None:
         parser.error('This test mode requires an explicit --data-dir.')
+    if args.operator_acceptance:
+        try:
+            from quota_guard.operator_acceptance import run_operator_acceptance
+            result = run_operator_acceptance(args.data_dir)
+        except Exception:
+            return 1  # Never enter a real session or GUI after an offline failure.
+        return 0 if (isinstance(result, dict) and result.get('passed') is True
+                     and type(result.get('real_requests')) is int
+                     and result['real_requests'] == 0) else 1
     if args.offline_acceptance:
         from quota_guard.offline_acceptance import run_offline_acceptance
         try:

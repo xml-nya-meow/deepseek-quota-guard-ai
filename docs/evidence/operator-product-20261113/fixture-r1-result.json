@@ -1,0 +1,14 @@
+{
+  "name": "positive-direct",
+  "passed": false,
+  "planned": true,
+  "executed": true,
+  "started_at": "2026-11-13T14:36:09.091088+08:00",
+  "read_state": "失败",
+  "read_status": "读取平台费用失败：管理授权必须来自本程序当前独立浏览器。 请检查平台登录状态和统计日期；会话已失效时先重新登录，再点击“立即读取费用”重试。",
+  "error_type": "AssertionError",
+  "error": "READ_NOT_APPLIED: 读取平台费用失败：管理授权必须来自本程序当前独立浏览器。 请检查平台登录状态和统计日期；会话已失效时先重新登录，再点击“立即读取费用”重试。",
+  "cleanup_passed": true,
+  "elapsed_seconds": 1.984,
+  "dialogs": []
+}

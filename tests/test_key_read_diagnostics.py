@@ -121,6 +121,7 @@ class KeyReadDiagnosticTests(unittest.TestCase):
 
 class KeyReadPreparationTests(unittest.TestCase):
     setUp = orchestration.HttpRevocationWorkflowTests.setUp
+    browser_submit = orchestration.HttpRevocationWorkflowTests.browser_submit
 
     def test_precise_read_reason_reaches_read_only_preflight_without_permit_or_post(self):
         for code in KEY_READ_REASONS:

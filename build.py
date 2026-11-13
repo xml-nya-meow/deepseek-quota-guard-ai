@@ -138,11 +138,33 @@ def copy_notices(output: Path, versions: dict[str, str]) -> dict[str, str]:
 def validate_bundle(output: Path) -> None:
     forbidden_names = {"管理设置.json", "当前账本.json", "界面偏好.json", "外观偏好.json", "账本", "人员额度.xlsx", "状态.db", ".运行锁",
                        ".初始化中", "browser-smoke.json", "ai-smoke.json", "acceptance.json",
+                       "operator-acceptance.json", "operator-smoke.json",
                        "OFFLINE-FIXTURE.txt", "ui-smoke.json", "responsibility.sqlite3", "responsibility.anchor.json"}
     forbidden_prefixes = ("运行日志-", "运行摘要-", "状态.db-", "responsibility.sqlite3-")
     for item in output.rglob("*"):
         if item.name in forbidden_names or item.name.startswith(forbidden_prefixes):
             raise RuntimeError("Build contains application data; the output was not published.")
+
+
+def copy_operator_assets(source: Path, bundle: Path) -> str:
+    """Copy the pinned 4B manifest only, never downloads, profiles or logs."""
+    from hashlib import sha256
+    from quota_guard.operator_runtime import verify_assets
+    source = source.expanduser().resolve()
+    verify_assets(source)
+    lock_bytes = (source / 'asset-lock.json').read_bytes()
+    manifest = json.loads(lock_bytes)
+    target = bundle / 'operator-ai'
+    target.mkdir(exist_ok=False)
+    (target / 'asset-lock.json').write_bytes(lock_bytes)
+    for relative in manifest['files']:
+        src, dst = source / relative, target / relative
+        if not src.resolve().is_relative_to(source) or not dst.resolve().is_relative_to(target.resolve()):
+            raise RuntimeError('Invalid 4B asset path.')
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+    verify_assets(target)
+    return sha256(lock_bytes).hexdigest()
 
 
 def build(args: argparse.Namespace) -> Path:
@@ -159,14 +181,18 @@ def build(args: argparse.Namespace) -> Path:
     verify_assets(ai_source)
     if (ai_source / 'asset-lock.json').read_bytes() != ai_lock:
         raise RuntimeError("AI assets must match the pinned release manifest.")
+    from quota_guard.operator_runtime import verify_assets as verify_operator_assets
+    operator_source = args.operator_assets.expanduser().resolve()
+    verify_operator_assets(operator_source)
     from quota_guard.build_identity import source_build_identity
     build_identity = source_build_identity(ROOT)
     output = args.output.expanduser().resolve()
     runtime = args.runtime.expanduser().resolve()
     if output.exists():
         raise RuntimeError("The output path already exists. Choose a new --output; nothing was overwritten.")
-    if output == runtime or output.is_relative_to(runtime) or runtime.is_relative_to(output):
-        raise RuntimeError("Output and browser runtime must be separate directories.")
+    for resource in (runtime, ai_source, operator_source):
+        if output == resource or output.is_relative_to(resource) or resource.is_relative_to(output):
+            raise RuntimeError("Output and runtime/model inputs must be separate directories.")
 
     environment = os.environ.copy()
     environment["PLAYWRIGHT_BROWSERS_PATH"] = str(runtime)
@@ -207,6 +233,7 @@ def build(args: argparse.Namespace) -> Path:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ai_source / relative, target)
         verify_assets(ai_target)
+        operator_lock_hash = copy_operator_assets(operator_source, bundle)
         license_info = copy_notices(bundle, versions)
         (bundle / "templates").mkdir()
         shutil.copy2(template, bundle / "templates" / template.name)
@@ -224,6 +251,9 @@ def build(args: argparse.Namespace) -> Path:
             "python": python_version, "platform": "Windows x64",
             "dependencies": versions, "browser_revisions": revisions,
             "local_ai_manifest_sha256": sha256(ai_lock).hexdigest(),
+            "operator_ai_manifest_sha256": operator_lock_hash,
+            "ai_roles": {"web_operator": "Qwen3-4B-Instruct-2507 Q4_K_M",
+                         "diagnostic_suggestions": "Qwen2.5-0.5B-Instruct Q4_K_M"},
             **license_info,
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         validate_bundle(bundle)
@@ -242,12 +272,14 @@ def main() -> int:
                         help="Playwright browser cache containing matching runtime components")
     parser.add_argument("--ai-assets", type=Path, default=ROOT / "local-ai",
                         help="Pinned Qwen and llama.cpp tree produced by tools/prepare_local_ai.py")
+    parser.add_argument("--operator-assets", type=Path, default=ROOT / "operator-ai",
+                        help="Pinned Qwen3 4B model, official template and llama-server tree; copied in full")
     parser.add_argument("--install-browser", action="store_true",
                         help="Download Chromium matching the installed Playwright version")
     args = parser.parse_args()
     try:
         output = build(args)
-    except (RuntimeError, OSError, subprocess.CalledProcessError) as exc:
+    except (RuntimeError, ValueError, OSError, subprocess.CalledProcessError) as exc:
         print(f"Build stopped: {exc}", file=sys.stderr)
         return 1
     print(f"Portable candidate created: {output}")

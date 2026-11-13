@@ -37,6 +37,7 @@ from .appearance import (THEME_MODES, load_theme_mode, save_theme_mode,
                          resolve_theme, apply_theme)
 from .window_layout import ScrollableContent, fit_window
 from .scheduler import CandidateQueue
+from .operator_status import AI_COLLECTION_LABELS, OperatorCollectionError
 
 TZ = timezone(timedelta(hours=8))
 POLL_MS = DEFAULT_POLL_INTERVAL_SECONDS * 1000
@@ -48,6 +49,7 @@ MANAGEMENT_CONTRACT_REASONS = frozenset({
     'KEY_LIST_DUPLICATE_IDENTITY', 'KEY_LIST_SCHEMA_INVALID',
 })
 FEE_STATE_LABELS = {
+    **AI_COLLECTION_LABELS,
     "NO_USAGE_DATA": "暂无明细，费用未知", "AUTH_REQUIRED": "需重新登录",
     "NO_SELECTED_USAGE_DATA": "受管 Key 暂无明细",
     "NO_MANAGED_KEYS": "无受管 Key，已跳过",
@@ -56,6 +58,7 @@ FEE_STATE_LABELS = {
     "HTTP_ERROR": "平台读取失败", "PLATFORM_REJECTED": "平台拒绝读取",
     "PERIOD_INCOMPLETE": "账单范围不足", "PERIOD_MISMATCH": "账单范围不符",
     "CHARGE_TYPE_UNSUPPORTED": "费用类别待适配",
+    "SCHEMA_UNSUPPORTED": "费用结构待适配",
     "LIFETIME_METADATA_INVALID": "创建日期未核验",
     "LIFETIME_SCOPE_UNSUPPORTED": "目标类型不支持历史累计",
     "LIFETIME_QUERY_LIMIT": "历史查询超过工作量上限",
@@ -159,6 +162,27 @@ def has_saved_data(folder: Path) -> bool:
     return False
 
 
+def initialize_first_management_scope(gate, store, *, declared_first_use, just_created):
+    """Only a declared first use at fresh-list creation may establish a scope.
+
+    A missing scope during startup or management is never an initialization
+    signal. Existing anchors, bindings, account history and partial registry
+    files all require the original recovery/migration flow.
+    """
+    from .responsibility_gate import action_history, ledger_anchor
+    if not declared_first_use or not just_created:
+        return False
+    config = store.load(require_workbook=False)
+    registry = gate.registry
+    if (config.account_id or store.active_tracking_ids() or action_history(store)
+            or ledger_anchor(store) is not None
+            or registry.directory.exists() or registry.directory.is_symlink()
+            or registry.anchor_path.exists() or registry.anchor_path.is_symlink()):
+        raise GuardError('发现已有管理记录或恢复痕迹，未创建新的管理范围。请使用“管理准备 / 恢复”保留并纳入原记录。')
+    gate.initialize([store])
+    return True
+
+
 def parse_editor_person(name: str, amount: str) -> Person:
     name, amount = name.strip(), amount.strip()
     if not amount or amount.startswith("="):
@@ -253,7 +277,7 @@ class App:
         self.diagnostics_dir = self.home_folder / "临时诊断日志"
         self.diagnostics = DiagnosticLog(self.diagnostics_dir)
         self._diagnostic("ui_opened", **diagnostic_build_identity())
-        self.root.title(f"DeepSeek 额度管理 · 本地 AI {__version__} · 预览版")
+        self.root.title(f"DeepSeek 额度管理 · 4B 网页操作 {__version__} · 试用版")
         fit_window(self.root)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self._build()
@@ -273,8 +297,8 @@ class App:
         self.main_content = ScrollableContent(self.root, padding=18)
         self.main_content.pack(fill="both", expand=True)
         outer = self.main_content.content
-        ttk.Label(outer, text="DeepSeek 额度管理 · 本地 AI", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(outer, text="核对平台费用 · 按人员核算 · 保留处理记录", style="Muted.TLabel").pack(anchor="w", pady=(3, 12))
+        ttk.Label(outer, text="DeepSeek 额度管理 · 内置 4B 网页操作", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(outer, text="填写表格 → 登录读取 → 开启管理 · 模型与浏览器由程序自动运行", style="Muted.TLabel").pack(anchor="w", pady=(3, 12))
         self.path_var = tk.StringVar(value=f"数据文件夹：{self.folder}")
         self.main_content.wrap(ttk.Label(outer, textvariable=self.path_var, wraplength=1040)).pack(anchor="w")
         self.summary_var = tk.StringVar(value="正在检查已有数据……")
@@ -300,7 +324,7 @@ class App:
                                    ("excel", "用 Excel/WPS 打开", self.open_excel),
                                    ("check", "检查表格", self.check_people),
                                    ("inspect", "检查删除准备（只读）", self.inspect_revoke),
-                                   ("responsibility", "建立本机责任范围", self.initialize_responsibility)]:
+                                   ("responsibility", "管理准备 / 恢复", self.initialize_responsibility)]:
             button = ttk.Button(sheet_bar, text=text, command=self._button_command(key, command))
             button.pack(side="left", padx=(0, 7))
             self.buttons[key] = button
@@ -322,7 +346,7 @@ class App:
         self.buttons["interrupt"] = ttk.Button(operation_bar, text="中断当前操作",
             command=self._button_command("interrupt", self.interrupt_operation))
         self.buttons["interrupt"].pack(side="left", padx=(0, 8))
-        self.buttons["diagnostics"] = ttk.Button(operation_bar, text="诊断日志 / 本地 AI",
+        self.buttons["diagnostics"] = ttk.Button(operation_bar, text="诊断日志 / 本地 AI 建议",
             command=self._button_command("diagnostics", self.open_diagnostics))
         self.buttons["diagnostics"].pack(side="left", padx=(0, 12))
         self.buttons["save_audit"] = ttk.Button(operation_bar, text="保存处理记录",
@@ -886,8 +910,8 @@ class App:
             existing = has_saved_data(self.folder)
             self.store = DataStore(self.folder)
             if not existing:
-                self.summary_var.set("首次运行：先填写人数和总预算，然后生成两列表格。")
-                self.status_var.set("没有既有记录。请选择“新建列表”，或打开已有数据文件夹。")
+                self.summary_var.set("首次运行：新建列表并填写人员额度，然后登录读取并开启管理。")
+                self.status_var.set("请选择“新建列表”；首次使用可在向导中准备管理记录。已有用户请选择原数据文件夹，不清空旧记录。")
                 self._update_buttons()
                 return
             self.config = self.store.load(require_workbook=False)
@@ -925,6 +949,25 @@ class App:
         """One explicit migration declaration, never per-key authorisation."""
         if not self.config or self.busy or self.observing or self.closing or self.audit_failed:
             return
+        from .responsibility_gate import ledger_anchor
+        registry = self.responsibility_gate.registry
+        if (registry.directory.exists() or registry.directory.is_symlink()
+                or registry.anchor_path.exists() or registry.anchor_path.is_symlink()
+                or ledger_anchor(self.store) is not None):
+            # Existing or interrupted evidence selects original recovery. It
+            # must never fall into the fresh-scope wizard after a failure.
+            try:
+                recovered = self.responsibility_gate.reconcile(self.store)
+                self.responsibility_gate.check(self.store)
+                self.refresh_rows()
+                self.refresh_events()
+            except Exception as exc:
+                self.error('管理准备 / 恢复未完成', exc,
+                    next_step='原登记和账本已保留；请恢复缺失文件或核实原操作，不要重新创建或清空登记。')
+                return
+            self.status_var.set(f'原管理记录已核验，恢复 {recovered} 项本地中断记录；'
+                                '没有执行平台删除。全自动管理保持停止，请先重新读取费用后正常启动。')
+            return
         stores = [self.store]
         while messagebox.askyesno('纳入已有账本',
                 '当前账本已列入范围。是否还有需要纳入的旧账本？\n'
@@ -937,7 +980,7 @@ class App:
             candidate.load(require_workbook=False)
             if all(s.folder != candidate.folder for s in stores):
                 stores.append(candidate)
-        if not messagebox.askyesno('一次性建立本机责任范围',
+        if not messagebox.askyesno('一次性管理准备（建立本机责任范围）',
                 '已声明账本数：' + str(len(stores)) + '\n'
                 '请先关闭旧版管理程序，确认需要保护的旧账本都已纳入。\n'
                 '本程序不能发现未选入的旧历史，也不能约束旧客户端、其他 Windows 用户或其他设备。\n'
@@ -1139,6 +1182,14 @@ class App:
         ttk.Radiobutton(choices, text='建立空白列表（使用上方新表默认值）', variable=inherit_var,
                         value=False).pack(anchor='w')
         scroller.wrap(ttk.Label(body, text="新列表按各 Key 创建日期至读取当天累计，之后持续更新；上方列表日期不限制历史费用。\n旧列表和记录完整保留；取消则不新建。延续保留人员与个人额度，费用重新核验。\n同账户的 Key 绑定和未结清处理记录始终保留。\n公共额度按总预算 ÷ 人数向下取整到元；空白姓名不纳入管理。", wraplength=500), padding=48).grid(row=7, column=0, columnspan=2, pady=15, sticky="w")
+        first_use_var = tk.BooleanVar(value=False)
+        if original_config is None:
+            first_use = ttk.Checkbutton(body,
+                text='这是本机首次使用，没有旧账本：同时准备管理记录', variable=first_use_var)
+            first_use.grid(row=8, column=0, columnspan=2, sticky='w', pady=(0, 8))
+            scroller.wrap(ttk.Label(body,
+                text='第一次使用可勾选，创建后直接填表、登录读取。若用过旧版或有待恢复记录，请勿勾选；用“管理准备 / 恢复”纳入原账本。',
+                style='Muted.TLabel', wraplength=500), padding=48).grid(row=9, column=0, columnspan=2, sticky='w')
 
         def validate_source():
             if (self.store is not original_store or self.config != original_config
@@ -1149,6 +1200,8 @@ class App:
                 raise GuardError('原列表或会话状态已变化，请关闭此窗口后重新新建。')
 
         def create():
+            management_prepared = False
+            preparation_error = None
             try:
                 validate_source()
                 n = int(values[0].get())
@@ -1174,6 +1227,15 @@ class App:
                     self.config = self.store.initialize(n, budget, start, initial_amount=defaults.amount,
                                                         fee_basis='key_lifetime')
                     save_current_ledger(self.home_folder, self.folder)
+                    try:
+                        management_prepared = initialize_first_management_scope(
+                            self.responsibility_gate, self.store,
+                            declared_first_use=first_use_var.get(), just_created=True)
+                    except Exception as exc:
+                        # The list already exists. Keep the original membership
+                        # evidence and explain its separate recovery outcome;
+                        # a partial preparation must never restart list creation.
+                        preparation_error = safe_error(exc)
             except Exception as exc:
                 messagebox.showerror("创建失败", safe_error(exc), parent=dialog)
                 return
@@ -1182,7 +1244,10 @@ class App:
             self.refresh_rows()
             self._action_state("setup", "已完成")
             self._update_buttons()
-            self.status_var.set("新列表已创建，旧列表和记录已保留。请保存人员表并重新读取费用；全自动管理保持停止。")
+            self.status_var.set(
+                '新列表与管理记录已准备，请填写人员额度，登录读取后开启管理。' if management_prepared else
+                '新列表已创建；管理准备未完成：' + preparation_error if preparation_error else
+                "新列表已创建，旧列表和记录已保留。请填写人员表并重新读取费用；首次管理准备或旧版迁移请点“管理准备 / 恢复”。")
             self.edit_people()
 
         ttk.Button(footer, text="创建新列表", command=self._button_command("setup_save", create)).pack(side='left')
@@ -1449,7 +1514,15 @@ class App:
                     '修正原因后可直接重新读取费用进行核验。')
             self._diagnostic("browser_action_failed", action=action, error_type=type(exc).__name__,
                              operation_id=diagnostic_operation_id)
-            self._action_state(button_key, "失败")
+            if action == 'collect' and isinstance(exc, OperatorCollectionError):
+                self.collection_reason_code = exc.reason_code
+                self._action_state(button_key, AI_COLLECTION_LABELS[exc.reason_code])
+                self._show_collection_summary(AI_COLLECTION_LABELS[exc.reason_code] +
+                    '；本次未取得可用费用结果，已保存金额保留。身份与费用仍需重新核验。')
+                self._diagnostic('collection_unavailable', reason_code=exc.reason_code,
+                                 retryable=False, operation_id=diagnostic_operation_id)
+            else:
+                self._action_state(button_key, "失败")
             log_failure = None
             if on_error:
                 try:
@@ -1467,6 +1540,9 @@ class App:
                          "请查看处理汇报并核实平台状态；结果不明时不会自动重试。")
             if log_failure:
                 self._audit_notice()
+            elif action == 'collect' and isinstance(exc, OperatorCollectionError):
+                self.error('本地 AI 读取未完成', exc, dialog=False,
+                           next_step='请按具体错误码检查完整软件包、本机模型或页面操作记录；修正后重新读取核验。')
             elif isinstance(exc, AccountMismatch):
                 self.account_mismatch = exc
                 self._action_state("account_ledger", "待选择")
@@ -1513,7 +1589,7 @@ class App:
                     self._diagnostic("browser_progress", action=action, stage=stage or action_title, elapsed=elapsed)
                 detail = f"当前操作：{safe_error(stage or action_title)}｜已用时 {elapsed} 秒"
                 if elapsed >= 30:
-                    detail += "｜平台响应较慢，任务仍在处理，请勿重复提交。"
+                    detail += "｜当前阶段仍在处理，请勿重复提交。"
                 self.progress_var.set(detail)
                 if on_progress:
                     try:
@@ -1857,9 +1933,9 @@ class App:
                             raise SnapshotApplyError(str(exc), reason_code='KEY_CREATION_EVIDENCE_INVALID',
                                 stage='identity_refresh', persistence_state='not_written') from exc
                     self._remember_collection(result)
-                reason = result.get('reason_code', 'SCHEMA_UNSUPPORTED')
+                reason = incoming_reason
                 self.collection_reason_code = reason
-                self._action_state("collect", FEE_STATE_LABELS.get(reason, "费用结构待核验"))
+                self._action_state("collect", FEE_STATE_LABELS.get(reason, "读取未完成"))
                 if reason == 'NO_SELECTED_USAGE_DATA':
                     self._show_collection_summary(f"费用核验：{state['period_label']}指定受管 Key 暂无费用明细；"
                                                   '实际费用仍未知，没有按零元入账，也不认定绑定错误。')
@@ -2008,7 +2084,7 @@ class App:
             reason = exc.reason_code if isinstance(exc, RegistryError) else 'RESPONSIBILITY_CHECK_FAILED'
             message = str(exc)
             if reason == 'REGISTRY_MISSING':
-                message += ('\n\n如果从未建立过：点击“建立本机责任范围”，纳入当前账本和需要保护的旧账本。'
+                message += ('\n\n如果从未建立过：点击“管理准备 / 恢复”（原“建立本机责任范围”），纳入当前账本和需要保护的旧账本。'
                             '\n如果以前建立过：请恢复原登记文件，不要重新创建或清空登记来绕过。'
                             '\n此处不会自动创建登记，也没有执行任何删除。')
             self._start_blocked('shared_responsibility', reason, message, dialog=True)
@@ -2442,7 +2518,7 @@ class App:
             if status == 'unknown_result':
                 self._diagnostic('revocation_outcome', status=status)
         record('pending', ('用户选择强制删除，忽略额度与费用条件；' if forced else '达到额度，') +
-               '准备通过控制台 HTTP 单次撤销；尚未进入提交步骤',
+               '准备通过官网网页单次撤销；尚未进入提交步骤',
                evidence=operation_store.action_evidence(row['name'], row['tracking_id']))
         verified_absence = False
         audit_recorded = False

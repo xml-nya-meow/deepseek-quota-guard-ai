@@ -214,7 +214,7 @@ class LifetimeServiceTests(unittest.TestCase):
 
     def collect(self, **overrides):
         with patch('quota_guard.platform_keys.ConsoleKeyManager', return_value=self.manager), \
-                patch('quota_guard.browser_service.ConsoleCostReader', return_value=self.reader), \
+                patch.object(self.service, '_create_cost_reader', return_value=self.reader), \
                 patch('quota_guard.browser_service.datetime', FixedDateTime), \
                 patch('quota_guard.browser_service.time.time', return_value=NOW):
             options = {'managed_names': ['Alpha'], 'fee_basis': 'key_lifetime'}

@@ -26,6 +26,30 @@
 
 本程序与 DeepSeek 没有官方隶属关系。依赖版本和网页适配需要后续维护。
 
-## 内置本地 AI 组件
+## 内置本地 AI 组件：0.5B 诊断
 
 Qwen2.5-0.5B-Instruct Q4_K_M 随附 Apache-2.0；llama.cpp CPU 完成程序随附 MIT；随包也保留 LLVM OpenMP 与 json.hpp 的许可。来源、版本和校验情况见[锁定资源说明](https://github.com/xml-nya-meow/deepseek-quota-guard-ai/tree/v0.2.0a1/local_ai)。便携包的许可原文在 `local-ai/licenses/`。
+
+## 内置本地 AI 组件：4B 网页操作
+
+`0.2.0a3.dev0` 新产品在独立的 `operator-ai/` 目录随附 **Qwen3-4B-Instruct-2507，Q4_K_M**、CPU 推理引擎和官方对话模板。该模型用于受限网页操作，0.5B 诊断模型不是其备用操作员。4B 模型卡说明参数量为 4.0B，属于 non-thinking 版本；本项目没有对权重追加训练，也不把动作 JSON 称为思维链。
+
+以下许可与来源依据本轮干净资产副本中的实际文件记录，未用模型名或量化文件名代替许可核对。
+
+| 组件 | 固定来源与版本 | 随包依据与归属 |
+| --- | --- | --- |
+| Qwen3-4B-Instruct-2507 基础模型 | [Qwen 固定版本](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507/tree/cdbee75f17c01a7cc42f958dc650907174af0554) | `operator-ai/metadata/base-README.md` 明列 `license: apache-2.0`；`base-LICENSE` 保留 Apache-2.0 原文。模型归属 Qwen。 |
+| Q4_K_M GGUF 量化 | [bartowski 固定版本](https://huggingface.co/bartowski/Qwen_Qwen3-4B-Instruct-2507-GGUF/tree/ae44f08e1392f39c0e474af10c3ff8355c8b6688) | `operator-ai/metadata/quant-README.md` 明列 `quantized_by: bartowski`、基础模型关系与量化说明。该副本没有独立的 license 字段或独立许可原文；这里保留量化作者署名及基座许可，不虚构另一份量化授权。 |
+| 官方 Jinja 对话模板 | 与上述 Qwen 基础模型相同的固定版本 | `operator-ai/metadata/qwen3-official.jinja` 是 `base-tokenizer_config.json` 中 `chat_template` 的逐字提取，保留基座 Apache-2.0 许可；不是本项目自创或 GGUF 内置旧模板。 |
+| llama.cpp CPU 引擎 | [b11960](https://github.com/ggml-org/llama.cpp/releases/tag/b11960)，[固定提交](https://github.com/ggml-org/llama.cpp/tree/8642541b255bfb5dc39cd351a178be09013a55d6) | `operator-ai/metadata/engine-LICENSE` 为 MIT，版权行是 Copyright (c) 2023-2026 The ggml authors；随附引擎 DLL/EXE 的身份见清单。量化 README 提到的 b6096 是其量化制作版本，不是本包运行引擎版本。 |
+| LLVM OpenMP 随附运行库 | 上述引擎发行包中的 `libomp.dll` | `operator-ai/engine/LICENSE-LLVM-OpenMP` 保留原文，文件说明 Apache License v2.0 with LLVM Exceptions，并包含后续许可与版权条款。不得只拷贝普通 Apache 文本代替此文件。 |
+
+正式便携包保留 `operator-ai/asset-lock.json`、其列出的 metadata、引擎文件与原许可。程序和构建按清单校验；本项目的 Apache-2.0 不覆盖或改写第三方许可。基础模型、量化来源与引擎是三个分别锁定的来源，不将第三方 GGUF 冒称为 Qwen 官方发布的量化文件。
+
+本轮固定指纹：
+
+- 资产清单 SHA-256：`f993de2b3e39e0639a3709adfbc54ca7ec66177edc83b6cad0c08f8ef527dd74`。
+- GGUF SHA-256：`2fde00ce69dd4899c70d020845e2638353015bba0fdf161b3eb965f2bca4464e`。
+- 官方模板 SHA-256：`0ab115e84509e86db2bb05a63edf63778ae7fe624972cdfa982b1e59053d6710`。
+
+2026-11-13 本次文档核对重新计算了干净资产中 11 个 metadata/许可文件的摘要，均与清单一致，并核对模板与 tokenizer 配置中的原字符串完全相同。本段不表示重新训练、独立审核全部第三方源码，或完成真实平台验收；模型整文件与最终成品的校验以相应构建记录为准。

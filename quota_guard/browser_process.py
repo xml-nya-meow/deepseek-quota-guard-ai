@@ -24,6 +24,7 @@ import uuid
 
 from .core import AccountMismatch, GuardError, _safe_detail
 from .revocation_permit import DeletePermit, KeyInspectionError, RevocationNotSubmitted
+from .operator_status import AI_COLLECTION_REASONS, OperatorCollectionError
 from .target_lock import validate_lock_names
 from .profile_recovery import (WindowsLifetime, job_name, ownership, plain_directory, profile_access_directory,
                                read_marker, recover_profiles, remove_profile_tree, resolved_profile_path,
@@ -35,8 +36,8 @@ def _operation_fields(task):
     return {'operation_id': value} if isinstance(value, str) and re.fullmatch('[0-9a-f]{32}', value) else {}
 
 
-_TIMEOUTS = {'login': 45, 'collect': 90, 'read_keys': 45, 'prepare_revoke': 45,
-             'inspect_revoke': 90, 'verify_revoke': 45, 'revoke': 65, 'selftest': 30}
+_TIMEOUTS = {'login': 45, 'collect': 600, 'read_keys': 45, 'prepare_revoke': 45,
+             'inspect_revoke': 90, 'verify_revoke': 45, 'revoke': 240, 'selftest': 30}
 _STAGES = {'login': '正在打开登录窗口', 'collect': '正在核对平台费用',
            'read_keys': '正在只读核验账户与 Key 列表',
            'prepare_revoke': '正在定位待处理人员', 'verify_revoke': '正在核实平台状态',
@@ -183,6 +184,15 @@ def _bootstrap(connection, target):
 
 def _worker_failure(exc, action, permit):
     """Preserve definite pre-submission failure only before this worker's gate."""
+    from .operator_runtime import OperatorError
+    if isinstance(exc, OperatorError):
+        code = getattr(exc, 'reason_code', None)
+        if action == 'collect' and permit is None and isinstance(code, str) and code in AI_COLLECTION_REASONS:
+            safe_error = OperatorCollectionError(code)
+            return {'ok': False, 'error_type': 'OperatorCollectionError',
+                    'message': str(safe_error), 'reason_code': safe_error.reason_code}
+        return {'ok': False, 'error_type': 'GuardError',
+                'message': '本地 AI 错误状态与当前操作不一致，未采用本次结果；请保留原记录核查。'}
     if action == 'read_keys':
         return {'ok': False,
                 'error_type': 'AccountMismatch' if isinstance(exc, AccountMismatch) and permit is None else 'GuardError',
@@ -974,6 +984,15 @@ class IsolatedBrowserService:
                                 code = (message.get('reason_code')
                                         if message.get('error_type') == 'KeyInspectionError' else None)
                                 error = KeyInspectionError(reason_code=code)
+                        elif message.get('error_type') == 'OperatorCollectionError':
+                            code = message.get('reason_code')
+                            if (task.action == 'collect' and task.permit is None
+                                    and task.permit_ready is False and task.decision_sent is False
+                                    and task.decision_allowed is False
+                                    and isinstance(code, str) and code in AI_COLLECTION_REASONS):
+                                error = OperatorCollectionError(code)
+                            else:
+                                error = GuardError('本地 AI 错误状态与当前操作不一致，未采用本次结果；请保留原记录核查。')
                         elif message.get('error_type') == 'KeyInspectionError':
                             error = GuardError('只读预检结果与当前动作不一致；当前结果未知，禁止自动重试撤销。')
                         elif message.get('error_type') == 'RevocationNotSubmitted':

@@ -1,0 +1,46 @@
+{
+  "choices": [
+    {
+      "finish_reason": "tool_calls",
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "type": "function",
+            "function": {
+              "name": "act_on_node",
+              "arguments": "{\"ref\": \"obs-1-1-n3\", \"action\": \"type\", \"value\": \"2026-11-13\"}"
+            },
+            "id": "UsX4nejxagq1s4pSdXM0RZlxr5OIY8PW"
+          }
+        ]
+      }
+    }
+  ],
+  "created": 1794554731,
+  "model": "<workspace>\\work\\ai-product-20261113\\operator-ai-assets\\models\\Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+  "system_fingerprint": "b11960-8642541b2",
+  "object": "chat.completion",
+  "usage": {
+    "completion_tokens": 48,
+    "prompt_tokens": 2536,
+    "total_tokens": 2584,
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  },
+  "id": "chatcmpl-6cxb8BHTdHDpeaUn6qIvxMfhT9JvUVkh",
+  "timings": {
+    "cache_n": 0,
+    "prompt_n": 2536,
+    "prompt_ms": 26625.519,
+    "prompt_per_token_ms": 10.49902168769716,
+    "prompt_per_second": 95.24696964592503,
+    "predicted_n": 48,
+    "predicted_ms": 4644.159,
+    "predicted_per_token_ms": 98.81189361702127,
+    "predicted_per_second": 10.120239208003
+  }
+}

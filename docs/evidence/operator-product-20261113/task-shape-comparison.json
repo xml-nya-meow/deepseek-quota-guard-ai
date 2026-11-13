@@ -1,0 +1,18 @@
+[
+  {
+    "observation": 1,
+    "same_public_observation": true,
+    "same_history": true,
+    "same_schema": true,
+    "same_system": true,
+    "only_task_shape_diff": true
+  },
+  {
+    "observation": 2,
+    "same_public_observation": true,
+    "same_history": true,
+    "same_schema": true,
+    "same_system": true,
+    "only_task_shape_diff": true
+  }
+]

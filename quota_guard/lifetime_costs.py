@@ -57,7 +57,8 @@ def _read_plan(periods):
     return plan
 
 
-def read_lifetime_costs(reader, periods, *, emit=None, started_monotonic=None):
+def read_lifetime_costs(reader, periods, *, emit=None, started_monotonic=None,
+                        max_read_seconds=MAX_READ_SECONDS):
     """Return only totals whose every requested segment has key evidence.
 
     An empty successful response is not a zero. Missing any segment removes
@@ -65,6 +66,10 @@ def read_lifetime_costs(reader, periods, *, emit=None, started_monotonic=None):
     complete lifetime total. A malformed response aborts the whole observation.
     """
     emit = emit or (lambda *_args, **_kwargs: None)
+    # Local CPU model operations need a longer but still bounded shared budget.
+    # The default retains the native-reader budget for legacy adapter callers.
+    if type(max_read_seconds) not in (int, float) or not 0 < max_read_seconds <= 540:
+        raise ValueError('invalid lifetime read budget')
     plan = _read_plan(periods)
     started = time.monotonic() if started_monotonic is None else started_monotonic
     totals = {key: Decimal(0) for key in periods}
@@ -73,7 +78,7 @@ def read_lifetime_costs(reader, periods, *, emit=None, started_monotonic=None):
     emit('lifetime_query_planned', count=len(periods), segment_count=len(plan))
 
     def check_time():
-        if time.monotonic() - started >= MAX_READ_SECONDS:
+        if time.monotonic() - started >= max_read_seconds:
             raise CostReadError('创建以来查询超过本轮时限，未应用部分累计；请保留原账本。',
                                 reason_code='LIFETIME_QUERY_TIMEOUT', retryable=True)
 

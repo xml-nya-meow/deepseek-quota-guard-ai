@@ -1,11 +1,15 @@
-"""Automatic HTTP orchestration, using in-memory fakes only."""
+"""AI browser orchestration with native HTTP evidence; in-memory doubles only."""
 from contextlib import contextmanager
 import unittest
+import time
 from unittest.mock import Mock, patch
 
 from quota_guard.browser_service import BrowserService, key_fingerprint
 from quota_guard.core import GuardError
+from quota_guard.operator_runtime import OperatorError
+from quota_guard.platform_keys import DeleteTarget
 from quota_guard.revocation_permit import DeletePermit, KeyInspectionError, RevocationNotSubmitted
+from quota_guard.web_operator import WebOperatorError
 
 KEYS = [
     {'name': 'Same name', 'tracking_id': '00000000-0000-0000-0000-000000000001'},
@@ -35,32 +39,99 @@ class HttpRevocationWorkflowTests(unittest.TestCase):
             finally:
                 self.capturing = False
         self.manager.capture.side_effect = capture
-        self.prepared = object()
+        self.prepared = DeleteTarget(TARGET, 'Same name', 'sk-fixture*****0001', 1700000000)
         self.manager.read_target.return_value = self.prepared
         self.manager.read_keys.side_effect = lambda: list(self.current)
         self.dispatches = 0
-        def submit(target, *, before_send):
-            self.assertIs(target, self.prepared)
-            before_send()
-            self.dispatches += 1
-            self.current = [KEYS[1]]
-            return {'submitted': True}
-        self.manager.submit_once.side_effect = submit
+        self.manager.submit_once.side_effect = AssertionError('Native HTTP must never submit deletion')
+        self.runtime = object()
+        self.service._get_operator_runtime = Mock(return_value=self.runtime)
+        self.operator = Mock(spec=['delete'])
+        self.operator.delete.side_effect = self.browser_submit
+        self.operator_factory = patch('quota_guard.browser_service.WebOperator', return_value=self.operator)
+        self.operator_constructor = self.operator_factory.start()
+        self.addCleanup(self.operator_factory.stop)
+        self.addCleanup(self.manager.submit_once.assert_not_called)
         self.factory = patch('quota_guard.platform_keys.ConsoleKeyManager', return_value=self.manager)
         self.factory.start()
         self.addCleanup(self.factory.stop)
+
+    def browser_submit(self, prepared, permit, inventory, *, deadline):
+        """Stand in for the paused final browser POST, not HTTP adapter submit."""
+        self.assertIs(prepared, self.prepared)
+        self.assertEqual(inventory, {key['tracking_id'] for key in KEYS})
+        self.assertGreater(deadline, time.monotonic())
+        self.assertFalse(permit.ready.is_set(), 'Service must not start the short permit before AI work')
+        permit.set_prepared_inventory(TARGET, inventory)
+        permit.ready.set()
+        if not permit.decided.wait(0) or not permit.allowed:
+            raise WebOperatorError('AI_OPERATOR_WRITE_REJECTED')
+        permit.consume_for_click()
+        self.dispatches += 1
+        self.current = [KEYS[1]]
+        return {'submitted': True}
 
     def permit(self, allowed=True):
         permit = DeletePermit()
         permit.decide(allowed)
         return permit
 
-    def test_http_is_only_automatic_channel_and_requires_independent_absence(self):
-        result = self.service._revoke('Same name', TARGET, self.permit())
+    def test_ai_browser_is_only_write_channel_and_requires_independent_http_absence(self):
+        permit = self.permit()
+        result = self.service._revoke('Same name', TARGET, permit)
         self.assertEqual(result, {'absent': True, 'present': False})
         self.assertEqual(self.dispatches, 1)
         self.manager.read_target.assert_called_once_with('Same name', TARGET, KEYS)
+        self.service._get_operator_runtime.assert_called_once()
+        self.operator_constructor.assert_called_once_with(
+            self.service.page, self.runtime, emit=self.service._log, stage=self.service._stage)
+        self.operator.delete.assert_called_once()
+        self.assertIs(self.operator.delete.call_args.args[1], permit)
+        self.assertEqual(permit.prepared_inventory(TARGET)['known_tracking_ids'], sorted(self.service.known_keys | {TARGET}))
+        self.manager.read_keys.assert_called_once()
+        with self.assertRaises(GuardError):
+            permit.consume_for_click()
         self.manager.clear.assert_called_once()
+        self.service._revoke_dom_legacy.assert_not_called()
+
+    def test_model_failure_before_ready_does_not_obtain_authorization_or_verify_success(self):
+        self.operator.delete.side_effect = WebOperatorError('AI_OPERATOR_BLOCKED')
+        permit = DeletePermit()
+        with self.assertRaises(RevocationNotSubmitted):
+            self.service._revoke('Same name', TARGET, permit)
+        self.assertFalse(permit.ready.is_set())
+        self.assertFalse(permit.allowed)
+        self.assertEqual(self.dispatches, 0)
+        self.manager.read_keys.assert_not_called()
+        self.manager.clear.assert_called_once()
+
+    def test_original_permit_is_granted_only_after_final_browser_boundary_is_ready(self):
+        permit = DeletePermit(target_tracking_id=TARGET)
+        original_set = permit.ready.set
+        def approve_at_boundary():
+            self.assertFalse(permit.allowed)
+            self.assertEqual(self.dispatches, 0)
+            self.assertEqual(permit.prepared_inventory(TARGET)['known_tracking_ids'],
+                             sorted(key['tracking_id'] for key in KEYS))
+            original_set()
+            permit.decide(True)
+        with patch.object(permit.ready, 'set', side_effect=approve_at_boundary):
+            result = self.service._revoke('Same name', TARGET, permit)
+        self.assertTrue(result['absent'])
+        self.assertIs(self.operator.delete.call_args.args[1], permit)
+        self.assertEqual(self.dispatches, 1)
+        with self.assertRaises(GuardError):
+            permit.consume_for_click()
+
+    def test_missing_model_does_not_fall_back_to_any_delete_channel(self):
+        self.service._get_operator_runtime.side_effect = OperatorError('AI_ASSETS_INVALID')
+        permit = DeletePermit()
+        with self.assertRaises(RevocationNotSubmitted):
+            self.service._revoke('Same name', TARGET, permit)
+        self.operator_constructor.assert_not_called()
+        self.assertFalse(permit.ready.is_set())
+        self.assertEqual(self.dispatches, 0)
+        self.manager.read_keys.assert_not_called()
         self.service._revoke_dom_legacy.assert_not_called()
 
     def test_first_required_list_navigation_is_inside_authorization_capture(self):
@@ -85,10 +156,12 @@ class HttpRevocationWorkflowTests(unittest.TestCase):
         self.assertEqual(result, {'preflight_passed': True, 'name': 'Same name',
                                   'tracking_id': TARGET, 'key_count': 2})
         self.assertEqual(observations, [True, True])
-        self.manager.prepare.assert_called_once_with(self.service.page)
+        self.manager.prepare.assert_called_once_with(self.service.page, allow_cost_fallback=False)
         self.manager.read_target.assert_called_once_with('Same name', TARGET, KEYS)
         self.manager.read_keys.assert_not_called()
         self.manager.submit_once.assert_not_called()
+        self.operator_constructor.assert_not_called()
+        self.service._get_operator_runtime.assert_not_called()
         self.manager.clear.assert_called_once()
         self.assertEqual(self.dispatches, 0)
         self.assertEqual(self.service.anchor, original_anchor)
@@ -205,9 +278,14 @@ class HttpRevocationWorkflowTests(unittest.TestCase):
         self.assertFalse(permit.ready.is_set())
         self.manager.submit_once.assert_not_called()
 
-    def test_denied_permit_cancels_without_entering_write_adapter(self):
-        result = self.service._revoke('Same name', TARGET, self.permit(False))
-        self.assertEqual(result, {'cancelled': True})
+    def test_denied_permit_stops_at_browser_boundary_and_never_reports_success(self):
+        permit = self.permit(False)
+        with self.assertRaises(WebOperatorError) as caught:
+            self.service._revoke('Same name', TARGET, permit)
+        self.assertEqual(caught.exception.reason_code, 'AI_OPERATOR_WRITE_REJECTED')
+        self.assertTrue(permit.ready.is_set())
+        self.assertEqual(self.dispatches, 0)
+        self.manager.read_keys.assert_not_called()
         self.manager.submit_once.assert_not_called()
         self.manager.clear.assert_called_once()
 
@@ -222,11 +300,11 @@ class HttpRevocationWorkflowTests(unittest.TestCase):
         self.service._revoke_dom_legacy.assert_not_called()
 
     def test_server_response_does_not_replace_independent_verification(self):
-        def submit(target, *, before_send):
-            before_send()
-            self.dispatches += 1
-            return {'submitted': True}
-        self.manager.submit_once.side_effect = submit
+        def submit(*args, **kwargs):
+            result = self.browser_submit(*args, **kwargs)
+            self.current = list(KEYS)
+            return result
+        self.operator.delete.side_effect = submit
         with self.assertRaises(GuardError) as raised:
             self.service._revoke('Same name', TARGET, self.permit())
         self.assertNotIsInstance(raised.exception, RevocationNotSubmitted)
@@ -239,7 +317,7 @@ class HttpRevocationWorkflowTests(unittest.TestCase):
             self.service._revoke('Same name', TARGET, self.permit())
         self.assertNotIsInstance(raised.exception, RevocationNotSubmitted)
         self.assertEqual(self.dispatches, 1)
-        self.manager.submit_once.assert_called_once()
+        self.operator.delete.assert_called_once()
         self.service._revoke_dom_legacy.assert_not_called()
 
     def test_failed_post_submission_read_remains_unknown_without_retry(self):
@@ -248,20 +326,19 @@ class HttpRevocationWorkflowTests(unittest.TestCase):
             self.service._revoke('Same name', TARGET, self.permit())
         self.assertNotIsInstance(raised.exception, RevocationNotSubmitted)
         self.assertEqual(self.dispatches, 1)
-        self.manager.submit_once.assert_called_once()
+        self.operator.delete.assert_called_once()
 
     def test_lost_response_after_acceptance_is_not_retried(self):
-        def submit(target, *, before_send):
-            before_send()
-            self.dispatches += 1
-            self.current = [KEYS[1]]
-            raise GuardError('Synthetic connection lost after acceptance')
-        self.manager.submit_once.side_effect = submit
+        def submit(*args, **kwargs):
+            self.browser_submit(*args, **kwargs)
+            raise WebOperatorError('AI_OPERATOR_RESULT_UNKNOWN', may_have_submitted=True)
+        self.operator.delete.side_effect = submit
         with self.assertRaises(GuardError) as raised:
             self.service._revoke('Same name', TARGET, self.permit())
         self.assertNotIsInstance(raised.exception, RevocationNotSubmitted)
         self.assertEqual(self.dispatches, 1)
-        self.manager.submit_once.assert_called_once()
+        self.operator.delete.assert_called_once()
+        self.manager.read_keys.assert_not_called()
         self.manager.clear.assert_called_once()
         self.service._revoke_dom_legacy.assert_not_called()
 

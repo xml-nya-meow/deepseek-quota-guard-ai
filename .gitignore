@@ -18,6 +18,7 @@ build-cache/
 .quota-build-*/
 browser-runtime/
 local-ai/
+operator-ai/
 *.gguf
 ai-smoke.json
 便携版/
@@ -65,6 +66,7 @@ ui-smoke.json
 acceptance.json
 portable-acceptance.json
 offline-acceptance-*/
+operator-acceptance-*/
 BUILD-INFO.json
 *.bak
 *.tmp

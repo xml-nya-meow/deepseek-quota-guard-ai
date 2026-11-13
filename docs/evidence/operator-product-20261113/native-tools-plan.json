@@ -1,0 +1,36 @@
+{
+  "diagnostic": "native-tools-diagnostic-r1",
+  "planned": 2,
+  "generation_seed": 17,
+  "config": {
+    "threads": 4,
+    "context": 8192,
+    "max_output_tokens": 256,
+    "temperature": 0.7,
+    "top_p": 0.8,
+    "top_k": 20,
+    "min_p": 0,
+    "generation_seed": 17,
+    "step_timeout_seconds": 60,
+    "startup_timeout_seconds": 120,
+    "cache_prompt": false
+  },
+  "source_hashes": {
+    "operator_runtime.py": "e3524b71ac84118afef8126b7b6d225bebff7d42b4667608bd5bc5092fe1e7ab",
+    "operator_contract.py": "744d113024d3b0daf13c523504e1ea17b32b04665d594a59a4aa9de51aa70b0d"
+  },
+  "runner_sha256": "175e1b9fda765c98f708cb6595a63a1a53e37503c649acd7a132e94eba579fef",
+  "protocol": "Official Qwen Hermes tools template plus /v1/chat/completions",
+  "parallel_tool_calls": false,
+  "tool_choice": "omitted (server default auto)",
+  "total_wall_budget_seconds": 270,
+  "each_decision_seconds": 60,
+  "comparison_limit": "Multiple integration differences: SYSTEM protocol sentences, tools definitions/descriptions, template tools branch, chat endpoint and server tool parsing; not a single-variable model quality trial.",
+  "history_source": "Unchanged from task-shape diagnostic: second history reconstructed from r4 observed action and no_change state.",
+  "inactive_tool_difference": "Four fixed function signatures are exposed; handle_dialog has static schema because the two observations have no dialog, and original validate_action rejects its use. All act_on_node references remain exact full public candidates.",
+  "user_schema_retained": true,
+  "browser_executed": false,
+  "platform_cost_requests": 0,
+  "platform_write_requests": 0,
+  "external_requests": 0
+}

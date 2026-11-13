@@ -1,0 +1,14 @@
+{
+  "name": "positive-direct",
+  "passed": false,
+  "planned": true,
+  "executed": true,
+  "started_at": "2026-11-13T14:37:21.433469+08:00",
+  "read_state": "费用结构待核验",
+  "read_status": "本次 4B AI 操作规划超时，已停止本次模型服务。 费用未核验，仅身份核验有效时的零额度可处理；未知费用不按零元计算。",
+  "error_type": "AssertionError",
+  "error": "READ_NOT_APPLIED: 本次 4B AI 操作规划超时，已停止本次模型服务。 费用未核验，仅身份核验有效时的零额度可处理；未知费用不按零元计算。",
+  "cleanup_passed": true,
+  "elapsed_seconds": 187.562,
+  "dialogs": []
+}

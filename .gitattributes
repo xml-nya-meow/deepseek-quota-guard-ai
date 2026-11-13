@@ -1,2 +1,4 @@
 # This lock is verified byte-for-byte in the portable build, including on Windows.
 local_ai/asset-lock.json text eol=lf
+# Published evidence hashes refer to UTF-8/LF bytes on every checkout.
+docs/evidence/operator-product-20261113/** text eol=lf

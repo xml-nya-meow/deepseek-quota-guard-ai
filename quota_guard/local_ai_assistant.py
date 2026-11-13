@@ -3,6 +3,7 @@ from dataclasses import asdict, dataclass
 import json
 
 from .revocation_permit import PREPARATION_REASONS
+from .operator_status import AI_COLLECTION_LABELS, AI_COLLECTION_REASONS
 
 
 # Every suggestion is application-authored. The model only chooses the reading order.
@@ -18,6 +19,7 @@ TOPICS = {
     'local_save': '查看处理汇报，对照本次费用是否写入。若提示待恢复，请先完成本地恢复，保留原账本。',
     'target_lock': '正常关闭占用同一目标的其他管理器，等待它完成清理。保留现有账本和互斥保护。',
     'share_diagnostics': '若问题重现，可向开发者提供程序版本、错误码和复现步骤。分享日志前移除凭证和账户信息。',
+    'ai_operator': '查看本轮本地 4B 操作的具体错误码和步骤。文件缺失、模型启动或通信问题应检查完整软件包与本机资源；页面动作问题请保留诊断记录。费用仍需重新读取核验。',
 }
 
 STAGES = {
@@ -41,6 +43,7 @@ FEE_REASONS = {
     'ACCOUNT_NOT_BOUND', 'AUDIT_EXPORT_FAILED', 'POST_COMMIT_REFRESH_FAILED',
     'SNAPSHOT_PERSISTENCE_UNKNOWN', 'LOCAL_APPLICATION_FAILED',
 }
+FEE_REASONS |= AI_COLLECTION_REASONS
 REASONS = FEE_REASONS | PREPARATION_REASONS.keys() | {'OK', 'OBSERVED_ABSENT', 'OBSERVED_PRESENT', 'RESULT_UNKNOWN', 'UNCLASSIFIED'}
 
 
@@ -119,6 +122,9 @@ def facts(case):
     if case.stage == 'revocation':
         return '该次撤销结果未知。后续操作应先核实平台状态，禁止自动重试。'
     if case.stage == 'fee_read':
+        if case.reason in AI_COLLECTION_REASONS:
+            return (AI_COLLECTION_LABELS[case.reason] + '。本条读取记录未提供新的可用费用；'
+                    '原金额不代表本次读取成功。撤销结果仍须按对应处理记录单独核实。')
         if case.reason == 'CHARGE_TYPE_UNSUPPORTED':
             return '平台返回了当前程序未识别的费用类别。本次没有可核验的新金额，不能据此认定账户不匹配。'
         if case.reason == 'NO_MANAGED_KEYS':
@@ -142,6 +148,10 @@ def facts(case):
 
 
 def topics_for(case):
+    if case.reason == 'AI_OPERATOR_RESULT_UNKNOWN':
+        return ('verify_platform', 'inflight_cost')
+    if case.reason in AI_COLLECTION_REASONS:
+        return ('ai_operator', 'share_diagnostics')
     if case.reason == 'KEY_TARGET_NOT_DELETABLE':
         return ('harness_managed', 'read_only_check', 'target_identity')
     if case.stage in {'verification', 'revocation'}:

@@ -37,7 +37,10 @@ jobs:
         run: python -B -m unittest discover -s tests -v
 
   portable:
-    if: github.event_name == 'workflow_dispatch' && inputs.build_portable
+    # This development branch has not passed actual 4B end-to-end acceptance.
+    # The old portable job checks the 0.5B assistant only and cannot qualify it.
+    # Restore a build job with pinned 4B assets and operator acceptance before release.
+    if: ${{ false }}
     needs: tests
     runs-on: windows-2022
     timeout-minutes: 30

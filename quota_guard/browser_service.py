@@ -27,6 +27,8 @@ from .page_notices import (dismiss_optional_notice, install_optional_notice_hand
                            raise_optional_notice_error)
 from .platform_http import ConsoleCostReader, CostReadError, cost_metadata, is_cost_endpoint
 from .revocation_permit import DeletePermit, KeyInspectionError, RevocationNotSubmitted
+from .operator_runtime import OperatorRuntime, OperatorError
+from .web_operator import AIConsoleCostReader, WebOperator, WebOperatorError
 
 TZ = timezone(timedelta(hours=8))
 BASE = 'https://platform.deepseek.com'
@@ -334,8 +336,10 @@ class BrowserService:
             self._dispose_browser()
 
     def _dispose_browser(self):
-        # Run on the Playwright worker thread. Clear references first so a
-        # manually closed window or partial launch cannot leave a reusable shell.
+        # Run on the Playwright worker thread. Invalidate the browser session
+        # immediately, but keep a model/reader whose cleanup was not confirmed.
+        # Otherwise a normal re-login could lose the last owned-process handle
+        # and launch a replacement while the previous model is still running.
         context, browser, pw = (getattr(self, name, None) for name in ('context', 'browser', 'pw'))
         self.context = self.browser = self.pw = self.page = None
         self.anchor = None
@@ -343,19 +347,38 @@ class BrowserService:
         self._last_key_snapshot = None
         self._login_waiting = True
         reader = getattr(self, '_cost_reader', None)
-        self._cost_reader = None
         self._cost_reader_identity = None
+        pending = False
         if reader is not None:
-            reader.clear()
+            try:
+                reader.clear()
+            except Exception:
+                pending = True
+            else:
+                self._cost_reader = None
+        runtime = getattr(self, '_operator_runtime', None)
+        if runtime is not None:
+            try:
+                runtime.close()
+            except Exception:
+                pending = True
+            else:
+                self._operator_runtime = None
+        self._operator_cleanup_pending = pending
         for resource, method in ((context, 'close'), (browser, 'close'), (pw, 'stop')):
             if resource is not None:
                 try:
                     getattr(resource, method)()
                 except Exception:
                     pass
+        if pending:
+            # All other cleanup steps above have run. No raw close exception
+            # can cross the UI boundary, and no replacement is started.
+            raise OperatorError('AI_CLEANUP_PENDING') from None
 
     def _ensure_browser(self):
-        if self.context and self.browser and self.page:
+        if (not getattr(self, '_operator_cleanup_pending', False)
+                and self.context and self.browser and self.page):
             try:
                 if self.browser.is_connected() and not self.page.is_closed():
                     return
@@ -389,10 +412,26 @@ class BrowserService:
             self._log('browser_startup_failed', phase='chromium',
                       reason_code=safe.reason_code, error_code=safe.error_code)
             raise safe from None
-        self.context = self.browser.new_context(locale='zh-CN', timezone_id='Asia/Shanghai', accept_downloads=True)
+        self.context = self.browser.new_context(locale='zh-CN', timezone_id='Asia/Shanghai',
+                                               accept_downloads=True, service_workers='block')
         self.page = self.context.new_page()
         self.page.set_default_timeout(12000)
         install_optional_notice_handler(self.page)
+
+    def _get_operator_runtime(self, *, deadline):
+        if getattr(self, '_operator_cleanup_pending', False):
+            raise OperatorError('AI_CLEANUP_PENDING')
+        runtime = getattr(self, '_operator_runtime', None)
+        if runtime is None:
+            runtime = self._operator_runtime = OperatorRuntime(emit=self._log)
+        self._stage('正在启动本地 4B 操作模型', phase='operator_start')
+        runtime.start(deadline=deadline)
+        return runtime
+
+    def _create_cost_reader(self, *, deadline):
+        return AIConsoleCostReader(self.context, page=self.page,
+            runtime=self._get_operator_runtime(deadline=deadline),
+            emit=self._log, stage=self._stage, deadline=deadline)
 
     def _login(self):
         self._stage('正在重建登录会话')
@@ -572,8 +611,10 @@ class BrowserService:
             reader.clear()
             reader = None
         if reader is None:
-            reader = self._cost_reader = ConsoleCostReader(self.context, emit=self._log)
+            reader = self._cost_reader = self._create_cost_reader(deadline=started_monotonic + 540)
             self._cost_reader_identity = identity
+        if isinstance(reader, AIConsoleCostReader):
+            reader.deadline = started_monotonic + 540
         result = {'keys': keys, 'account_id': identity, 'totals': None,
                   'start_date': start_date, 'end_date': end,
                   'source_id': '', 'reason_code': 'NOT_COLLECTED', 'retryable': False,
@@ -598,12 +639,12 @@ class BrowserService:
                   request_span_days=(datetime.fromisoformat(end).date()
                                      - datetime.fromisoformat(start_date).date()).days + 1)
         try:
-            self._stage('正在建立本次登录的费用接口会话')
+            self._stage('正在准备本次 AI 费用操作')
             if selected_ids is None:
                 reader.prepare(self.page)
             else:
                 reader.prepare(self.page, tracking_ids=selected_ids)
-            self._stage('正在通过 HTTP 读取指定周期费用')
+            self._stage('正在由本地 4B 操作网页读取指定周期费用')
             if selected_ids is None:
                 url, payload = reader.read(start_date, end)
                 result['totals'] = parse_cost_response(payload, url, start_date, end)
@@ -680,20 +721,23 @@ class BrowserService:
                     reader.clear()
                     reader = None
                 if reader is None:
-                    reader = self._cost_reader = ConsoleCostReader(self.context, emit=self._log)
+                    reader = self._cost_reader = self._create_cost_reader(deadline=started_monotonic + 540)
                     self._cost_reader_identity = identity
+                if isinstance(reader, AIConsoleCostReader):
+                    reader.deadline = started_monotonic + 540
                 try:
                     self._stage('正在只读核验受管 Key 的创建日期')
                     # This metadata read must never visit account-wide usage.
                     manager.prepare(self.page, allow_cost_fallback=False)
                     origins = manager.read_creation_times(keys, selected, observed_wall=started_wall)
                     periods = creation_periods(origins, end, started_wall)
-                    self._stage('正在建立本次登录的费用接口会话')
+                    self._stage('正在准备本次 AI 费用操作')
                     reader.prepare(self.page, tracking_ids=selected)
                     self._stage('正在分段读取每枚 Key 创建以来的费用')
                     try:
                         totals, source = read_lifetime_costs(reader, periods, emit=self._log,
-                                                           started_monotonic=started_monotonic)
+                                                           started_monotonic=started_monotonic,
+                                                           max_read_seconds=540)
                     except CostReadError as exc:
                         if exc.reason_code != 'LIFETIME_PERIOD_INCOMPLETE':
                             raise
@@ -823,7 +867,7 @@ class BrowserService:
                     preparation_phase = 'KEY_BOOTSTRAP_FAILED'
                     phase = 'authorization'
                     with self._key_preparation_step(phase, '正在取得本次管理授权'):
-                        manager.prepare(self.page)
+                        manager.prepare(self.page, allow_cost_fallback=False)
                     preparation_phase = 'KEY_TARGET_READ_FAILED'
                     phase = 'target_http'
                     with self._key_preparation_step(phase, '正在通过 HTTP 核验完整目标信息'):
@@ -863,26 +907,27 @@ class BrowserService:
             raise KeyInspectionError(reason_code=reason) from None
 
     def _revoke(self, name, tracking_id, permit):
-        """The only automatic submission channel: one verified HTTP attempt.
+        """Model-selected UI actions; one request-boundary-authorized POST.
 
-        The public console client supplies a candidate contract; its live
-        server behavior remains subject to dedicated acceptance. Never fall
-        back to DOM clicks after a failed or uncertain HTTP attempt.
+        Native HTTP remains read-only evidence. It is never a deletion fallback.
+        The original short permit begins only when the final browser POST is
+        paused at the route, after all model inference and confirmation steps.
         """
         with self._prepared_http_target(name, tracking_id) as (manager, prepared, expected):
-            self._stage('等待账本核验和一次性撤销许可')
-            permit.set_prepared_inventory(tracking_id, expected)
-            permit.ready.set()
-            if not permit.decided.wait(20) or not permit.allowed:
-                return {'cancelled': True}
-            self._stage('正在单次提交撤销，结果需要核验')
-            self._log('revocation_http_dispatch_preparing', channel='console_http',
-                      phase='may_submit', tracking_id=tracking_id)
-            # The adapter calls this immediately before its one request.post;
-            # no retries, delayed re-login, or DOM fallback may consume it again.
-            manager.submit_once(prepared, before_send=permit.consume_for_click)
-            self._log('revocation_http_response_accepted', channel='console_http',
-                      tracking_id=tracking_id)
+            deadline = time.monotonic() + 180
+            try:
+                runtime = self._get_operator_runtime(deadline=deadline)
+                WebOperator(self.page, runtime, emit=self._log, stage=self._stage).delete(
+                    prepared, permit, expected, deadline=deadline)
+            except (WebOperatorError, OperatorError) as exc:
+                self._log('operator_delete_stopped', reason_code=exc.reason_code,
+                          may_submit=bool(getattr(exc, 'may_have_submitted', False)))
+                if (not permit.ready.is_set() and not permit.allowed
+                        and not getattr(exc, 'may_have_submitted', False)):
+                    raise RevocationNotSubmitted(
+                        '本地 AI 操作在提交前停止，尚未进入撤销提交步骤。\n' + str(exc),
+                        reason_code='PREPARATION_FAILED') from None
+                raise
             self._stage('正在独立核验平台撤销结果')
             # A frontend may optimistically remove a row. Require a separate
             # server GET as well as the reloaded DOM and surviving known anchor.

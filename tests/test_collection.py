@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlparse
 from playwright.sync_api import sync_playwright
 
 from quota_guard.browser_service import BASE, COST_PATH, TZ, BrowserService, key_fingerprint
+from quota_guard.platform_http import ConsoleCostReader
 from test_key_table import TARGET, SURVIVOR, document, key_row
 from test_platform_http import Response
 
@@ -106,6 +107,11 @@ class CollectionTests(unittest.TestCase):
         self.service = object.__new__(BrowserService)
         self.service.page = self.page
         self.service.context = SimpleNamespace(request=SimpleNamespace(get=self.http_get))
+        # This suite exercises the retained read-only protocol/parser adapter.
+        # Product AI interaction is covered separately by test_web_operator and
+        # the real 4B acceptance command, never silently replaced in production.
+        self.service._create_cost_reader = lambda **_kwargs: ConsoleCostReader(
+            self.service.context, emit=self.service._log)
         self.service.key_table_timeout = 1
         self.service.key_table_stable_seconds = .05
         self.service.anchor = None

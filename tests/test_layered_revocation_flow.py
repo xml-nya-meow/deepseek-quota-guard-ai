@@ -1,17 +1,42 @@
-"""BrowserService + real HTTP parser; only transport and DOM are offline doubles."""
+"""AI-write orchestration + real HTTP evidence parser; offline doubles only."""
 from contextlib import nullcontext
 import unittest
+import time
 from unittest.mock import Mock, patch
 
 import test_platform_keys as fixtures
 from quota_guard.browser_service import BrowserService, key_fingerprint
 from quota_guard.core import GuardError
 from quota_guard.revocation_permit import DeletePermit, KeyInspectionError, RevocationNotSubmitted
+from quota_guard.web_operator import WebOperatorError
 
 
 class LayeredRevocationFlowTests(unittest.TestCase):
-    setUp = fixtures.PlatformKeyTests.setUp
     replace_list = fixtures.PlatformKeyTests.replace_list
+
+    def setUp(self):
+        fixtures.PlatformKeyTests.setUp(self)
+        self.manager.submit_once = Mock(side_effect=AssertionError('Native HTTP must stay read-only'))
+        self.addCleanup(self.manager.submit_once.assert_not_called)
+        self.addCleanup(self.api.post.assert_not_called)
+        self.browser_posts = Mock(return_value={'submitted': True})
+        self.operator = Mock(spec=['delete'])
+        self.operator.delete.side_effect = self.browser_submit
+        operator_patch = patch('quota_guard.browser_service.WebOperator', return_value=self.operator)
+        self.operator_constructor = operator_patch.start()
+        self.addCleanup(operator_patch.stop)
+
+    def browser_submit(self, prepared, permit, inventory, *, deadline):
+        """Represent the validated browser POST; actual parsing stays in manager."""
+        self.assertGreater(deadline, time.monotonic())
+        self.assertEqual(inventory, {key['tracking_id'] for key in self.expected})
+        self.assertFalse(permit.ready.is_set())
+        permit.set_prepared_inventory(prepared.tracking_id, inventory)
+        permit.ready.set()
+        if not permit.decided.wait(0) or not permit.allowed:
+            raise WebOperatorError('AI_OPERATOR_WRITE_REJECTED')
+        permit.consume_for_click()
+        return self.browser_posts(prepared)
 
     def service(self):
         service = object.__new__(BrowserService)
@@ -21,6 +46,7 @@ class LayeredRevocationFlowTests(unittest.TestCase):
         self.current = list(self.expected)
         service._keys = Mock(side_effect=lambda: list(self.current))
         service._revoke_dom_legacy = Mock(side_effect=AssertionError('No DOM fallback'))
+        service._get_operator_runtime = Mock(return_value=object())
         self.manager.capture = Mock(side_effect=lambda page: nullcontext())
         self.manager.prepare = Mock()
         return service
@@ -38,6 +64,8 @@ class LayeredRevocationFlowTests(unittest.TestCase):
         self.assertIsNone(self.manager._issued)
         self.assertFalse(self.manager._headers)
         self.api.post.assert_not_called()
+        self.operator_constructor.assert_not_called()
+        service._get_operator_runtime.assert_not_called()
 
     def test_unknown_selected_item_is_not_submitted_even_with_granted_permit(self):
         rows = self.fixture['list_response']['data']['biz_data']['api_keys']
@@ -51,45 +79,48 @@ class LayeredRevocationFlowTests(unittest.TestCase):
         self.assertEqual(caught.exception.reason_code, 'KEY_TARGET_KIND_UNSUPPORTED')
         self.assertFalse(permit.ready.is_set())
         self.api.post.assert_not_called()
+        self.operator.delete.assert_not_called()
         service._revoke_dom_legacy.assert_not_called()
 
     def test_actual_parser_post_followup_accepts_identity_of_unknown_empty_survivor(self):
         service = self.service()
-        response = self.api.post.return_value
-        def posted(*args, **kwargs):
+        def posted(prepared):
+            self.assertEqual(prepared.tracking_id, self.expected[0]['tracking_id'])
             rows = self.fixture['list_response']['data']['biz_data']['api_keys']
             rows.pop(0)
             rows[0].update(key_type='CASE06', sensitive_id='', created_at=None)
             rows[1].pop('created_at')
             self.replace_list()
             self.current = self.expected[1:]
-            return response
-        self.api.post.side_effect = posted
+            return {'submitted': True}
+        self.browser_posts.side_effect = posted
         permit = DeletePermit(); permit.decide(True)
         with patch('quota_guard.platform_keys.ConsoleKeyManager', return_value=self.manager):
             result = service._revoke(**self.expected[0], permit=permit)
         self.assertEqual(result, {'absent': True, 'present': False})
-        self.api.post.assert_called_once()
+        self.browser_posts.assert_called_once()
+        self.operator.delete.assert_called_once()
+        self.assertIs(self.operator.delete.call_args.args[1], permit)
         self.assertEqual(self.api.get.call_count, 2)
         service._revoke_dom_legacy.assert_not_called()
 
     def test_post_submit_identity_difference_remains_unknown_not_not_submitted(self):
         service = self.service()
-        response = self.api.post.return_value
-        def posted(*args, **kwargs):
+        def posted(prepared):
             rows = self.fixture['list_response']['data']['biz_data']['api_keys']
             rows.pop(0)
             rows[0].update(key_type='CASE06', sensitive_id='', name='Different HTTP identity')
             self.replace_list()
             self.current = self.expected[1:]
-            return response
-        self.api.post.side_effect = posted
+            return {'submitted': True}
+        self.browser_posts.side_effect = posted
         permit = DeletePermit(); permit.decide(True)
         with patch('quota_guard.platform_keys.ConsoleKeyManager', return_value=self.manager):
             with self.assertRaises(GuardError) as caught:
                 service._revoke(**self.expected[0], permit=permit)
         self.assertNotIsInstance(caught.exception, RevocationNotSubmitted)
-        self.api.post.assert_called_once()
+        self.browser_posts.assert_called_once()
+        self.operator.delete.assert_called_once()
         service._revoke_dom_legacy.assert_not_called()
 
     def mixed_console_list(self):
@@ -114,26 +145,25 @@ class LayeredRevocationFlowTests(unittest.TestCase):
         # First DOM, pre-send DOM recheck, and post-send DOM all differ in order.
         survivors = [item for item in reversed(self.expected) if item != selected]
         service._keys.side_effect = [self.expected, list(reversed(self.expected)), survivors]
-        response = self.api.post.return_value
-
-        def post(_url, **options):
-            self.assertEqual(options['data'], {
-                'action': 'delete', 'name': None, 'tracking_id': selected['tracking_id'],
-                'redacted_key': target['sensitive_id'], 'created_at': target['created_at'],
-            })
+        def post(prepared):
+            self.assertEqual(prepared.tracking_id, selected['tracking_id'])
+            self.assertEqual(prepared.name, selected['name'])
+            self.assertEqual(prepared.sensitive_id, target['sensitive_id'])
+            self.assertEqual(prepared.created_at, target['created_at'])
             data['api_keys'] = [r for r in reversed(data['api_keys']) if r['tracking_id'] != selected['tracking_id']]
             data['key_quota']['total']['used'] = 2
             self.replace_list()
-            return response
+            return {'submitted': True}
 
-        self.api.post.side_effect = post
+        self.browser_posts.side_effect = post
         permit = DeletePermit()
         permit.decide(True)
         with patch('quota_guard.platform_keys.ConsoleKeyManager', return_value=self.manager):
             result = service._revoke(**selected, permit=permit)
         self.assertEqual(result, {'absent': True, 'present': False})
         self.assertEqual(service.known_keys, survivor_ids)
-        self.api.post.assert_called_once()
+        self.browser_posts.assert_called_once()
+        self.operator.delete.assert_called_once()
         self.assertEqual(self.api.get.call_count, 2)
         service._revoke_dom_legacy.assert_not_called()
 
@@ -155,3 +185,4 @@ class LayeredRevocationFlowTests(unittest.TestCase):
         self.assertEqual(action_failure.exception.reason_code, 'KEY_TARGET_NOT_DELETABLE')
         self.assertFalse(permit.ready.is_set())
         self.api.post.assert_not_called()
+        self.operator.delete.assert_not_called()

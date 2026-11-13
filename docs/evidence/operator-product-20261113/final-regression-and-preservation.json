@@ -1,0 +1,20 @@
+{
+  "recorded_date": "2026-11-14",
+  "version": "0.2.0a3.dev0",
+  "tests": 1380,
+  "elapsed_seconds": 484.862,
+  "skipped": 0,
+  "passed": true,
+  "frozen_python_files_checked": 151,
+  "frozen_python_files_changed": [],
+  "old_source_files_checked": 193,
+  "old_source_files_changed": [],
+  "old_source_head_unchanged": true,
+  "old_source_status_unchanged": true,
+  "regression_log_sha256": "44c0339df988e4dc0a31c43d4a2a79e10f545a8c99be08ff5e290a1d849bf747",
+  "limits": [
+    "Program regression is not actual 4B capability acceptance.",
+    "No new executable was built or released.",
+    "Protected source verification does not enumerate or read real ledgers."
+  ]
+}
