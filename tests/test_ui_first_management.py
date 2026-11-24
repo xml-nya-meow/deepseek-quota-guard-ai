@@ -96,7 +96,8 @@ class FirstManagementTests(unittest.TestCase):
         return SimpleNamespace(config=self.store.load(), busy=False, observing=False,
                                closing=False, audit_failed=False, store=self.store,
                                responsibility_gate=self.gate, refresh_rows=Mock(),
-                               refresh_events=Mock(), status_var=Mock(), error=Mock())
+                               refresh_events=Mock(), desktop=Mock(spec_set=['update']),
+                               status_var=Mock(), error=Mock())
 
     def test_management_button_reuses_ready_scope_and_never_initializes_again(self):
         self.initialize()
@@ -109,6 +110,7 @@ class FirstManagementTests(unittest.TestCase):
         prompt.assert_not_called()
         app.error.assert_not_called()
         self.assertEqual(self.gate.registry.snapshot()['epoch'], before)
+        app.desktop.update.assert_called_once_with()
         self.assertIn('全自动管理保持停止', app.status_var.set.call_args.args[0])
 
     def test_management_button_resumes_exact_interrupted_membership_plan(self):
@@ -123,6 +125,7 @@ class FirstManagementTests(unittest.TestCase):
         app.error.assert_not_called()
         self.assertEqual(self.gate.registry.snapshot()['phase'], 'ready')
         self.assertEqual(self.gate.registry.membership_plan()['plan_id'], plan_id)
+        app.desktop.update.assert_called_once_with()
 
     def test_management_button_missing_original_scope_never_opens_fresh_wizard(self):
         self.initialize()

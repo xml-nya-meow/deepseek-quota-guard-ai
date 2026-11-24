@@ -9,14 +9,15 @@ import json
 from types import SimpleNamespace
 import threading
 import unittest
-from unittest.mock import Mock
-from urllib.error import HTTPError
+from unittest.mock import Mock, patch
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 
 from quota_guard.operator_fixture import (
     COST, EDIT, LIST, ORIGIN, LoopbackTransport, OfflineContext,
     OfflinePlatform, OfflineResponse, envelope,
 )
+from quota_guard.operator_runtime import OperatorRuntime
 
 
 def delete_payload(key):
@@ -155,6 +156,26 @@ class LoopbackTransportTests(unittest.TestCase):
         self.addCleanup(self.platform.close)
         self.transport = LoopbackTransport(self.platform.origin)
 
+    def test_both_loopback_clients_work_without_tls_resources_or_system_proxies(self):
+        with patch('ssl._create_default_https_context', side_effect=FileNotFoundError('synthetic CA')), \
+                patch('urllib.request.getproxies', side_effect=AssertionError('unneeded system proxy lookup')):
+            transport = LoopbackTransport(self.platform.origin)
+            model = OperatorRuntime()
+            self.addCleanup(model.close)
+            model.origin = self.platform.origin
+            self.assertEqual(transport.get(ORIGIN + LIST).status, 200)
+            with patch.object(self.platform, 'handle', return_value=(200, 'application/json', b'{"status":"ok"}')) as request:
+                self.assertEqual(model._request('/health'), {'status':'ok'})
+            self.assertEqual(request.call_args.args[:2], ('GET', '/health'))
+
+    def test_loopback_http_rejects_other_origins_and_protocols_before_connecting(self):
+        with patch('socket.create_connection') as connect:
+            for url in ('https://127.0.0.1/', 'http://example.invalid/', 'http://user@127.0.0.1/',
+                        'file:///unused', 'data:text/plain,unused'):
+                with self.subTest(url=url), self.assertRaises(URLError):
+                    self.transport.http.open(url)
+            connect.assert_not_called()
+
     def test_only_owned_loopback_backend_origins_are_accepted(self):
         for origin in ('https://127.0.0.1:1234', 'http://localhost:1234',
                        'http://127.0.0.2:1234', 'http://example.invalid:1234',
@@ -258,13 +279,15 @@ class LoopbackTransportTests(unittest.TestCase):
         redirect_thread = threading.Thread(target=redirector.serve_forever, daemon=True)
         redirect_thread.start()
         try:
-            transport = LoopbackTransport('http://127.0.0.1:' + str(redirector.server_port))
-            try:
-                response = transport.get(ORIGIN + LIST)
-            except (ValueError, HTTPError):
-                pass
-            else:
-                self.assertEqual(response.status, 302)
+            origin = 'http://127.0.0.1:' + str(redirector.server_port)
+            self.assertEqual(LoopbackTransport(origin).get(ORIGIN + LIST).status, 302)
+            model = OperatorRuntime()
+            self.addCleanup(model.close)
+            model.origin = origin
+            with self.assertRaises(HTTPError) as error:
+                model._request('/health')
+            self.assertEqual(error.exception.code, 302)
+            error.exception.close()
             self.assertEqual(arrivals, [], 'redirect escaped the one fixture origin')
         finally:
             redirector.shutdown()

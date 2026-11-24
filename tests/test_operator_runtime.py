@@ -264,13 +264,11 @@ class OperatorRuntimeTests(unittest.TestCase):
             model.decide(task(), observation(), [], deadline=time.monotonic() + 2)
         self.assertEqual(error.exception.reason_code, 'AI_RUNTIME_CLOSED')
 
-    def test_environment_and_redirects_cannot_forward_to_external_services(self):
+    def test_environment_cannot_forward_to_external_services(self):
         with patch.dict(os.environ, {'HTTPS_PROXY': 'https://untrusted.invalid', 'DEEPSEEK_API_KEY': 'secret', 'PATH': 'unsafe'}):
             environment = runtime.isolated_env('temporary')
         self.assertNotIn('HTTPS_PROXY', environment);self.assertNotIn('DEEPSEEK_API_KEY', environment)
         self.assertNotEqual(environment['PATH'], 'unsafe')
-        with self.assertRaises(Exception):
-            runtime.NoRedirect().redirect_request(None, None, 302, 'Found', {}, 'https://example.invalid')
 
     @unittest.skipUnless(os.name == 'nt', 'Windows Job ownership test')
     def test_owned_windows_job_closes_only_spawned_test_process(self):

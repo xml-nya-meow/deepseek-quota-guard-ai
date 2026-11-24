@@ -17,6 +17,7 @@ import urllib.error
 from uuid import UUID
 
 from .core import TZ
+from .loopback_http import loopback_http_opener
 
 ORIGIN='https://platform.deepseek.com'
 LIST='/api/v0/users/get_api_keys'
@@ -140,9 +141,7 @@ class LoopbackTransport:
         parsed=urlsplit(origin)
         if parsed.scheme!='http' or parsed.hostname!='127.0.0.1' or parsed.path:raise ValueError('Offline loopback origin required')
         self.origin=origin
-        class NoRedirect(urllib.request.HTTPRedirectHandler):
-            def redirect_request(self,*args,**kwargs):return None
-        self.http=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect())
+        self.http=loopback_http_opener()
     def fetch(self,url,*,method='GET',body=None,source='api-context'):
         if method not in ('GET','HEAD') and source!='browser':raise AssertionError('OFFLINE_SCRIPT_POST_FORBIDDEN')
         parsed=urlsplit(url)

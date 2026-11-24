@@ -25,6 +25,7 @@ import urllib.parse
 import urllib.request
 
 from .core import GuardError
+from .loopback_http import loopback_http_opener
 from .operator_contract import MODEL_TOOLS, compile_action_schema, normalize_tool_error, validate_action
 
 MODEL = 'Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf'
@@ -79,11 +80,6 @@ class OperatorError(GuardError):
     def __init__(self, reason_code):
         self.reason_code = reason_code if reason_code in _MESSAGES else 'AI_OUTPUT_INVALID'
         super().__init__(_MESSAGES[self.reason_code])
-
-
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        raise urllib.error.URLError('Local inference redirect forbidden')
 
 
 def _unique_json_pairs(pairs):
@@ -368,7 +364,7 @@ class OperatorRuntime:
         self.assets = None; self._server = None; self._temporary = None
         self._busy = threading.Lock(); self._lifecycle = threading.RLock()
         self._token = secrets.token_hex(24)
-        self._http = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        self._http = loopback_http_opener()
         self.origin = None; self.last_metrics = {}; self.decisions = 0
 
     def _emit(self, event, **fields):

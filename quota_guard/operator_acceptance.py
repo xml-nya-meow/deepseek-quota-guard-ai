@@ -106,6 +106,17 @@ def _offline_worker(connection, *, config):
     class OfflineBrowserService(service_module.BrowserService):
         def _ensure_browser(self):
             if self.context and self.browser and self.page and self.browser.is_connected() and not self.page.is_closed():return
+            try:
+                self._open_loopback_browser()
+            except Exception as exc:
+                if config.get('trace'):
+                    import traceback
+                    trace({'kind':'offline_browser_start_failed','error_type':type(exc).__name__,
+                           'stack':[(frame.f_globals.get('__name__'), frame.f_code.co_name, line)
+                                    for frame, line in traceback.walk_tb(exc.__traceback__)]})
+                raise
+
+        def _open_loopback_browser(self):
             self._dispose_browser()
             self.pw=sync_playwright().start()
             self.browser=self.pw.chromium.launch(executable_path=config['chromium'],headless=True,
