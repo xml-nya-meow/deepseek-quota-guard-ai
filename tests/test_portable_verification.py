@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from build import validate_bundle
+from build import validate_browser_runtime, validate_bundle
 from tools.verify_portable_candidate import EXPECTED_CASES, check_operator_result, check_result, verify
 
 
@@ -82,6 +82,46 @@ class PortableVerificationTests(unittest.TestCase):
                             validate_bundle(folder)
                     finally:
                         file.unlink()
+
+    def test_browser_assets_reject_profiles_logs_and_host_caches_before_and_after_copy(self):
+        residues = (
+            "%SystemDrive%/ProgramData/Microsoft/Windows/Caches/cversions.2.db",
+            "%sYsTeMdRiVe%/unrelated.dat", "cversions.2.db", "DeBuG.LoG", "chrome_debug.log.1",
+            "User Data/Default/Network/Cookies", "Network/Cookies-journal", "Login Data For Account",
+            "Secure Preferences", "History-wal", "Session Storage/000004.ldb", "crash.dmp",
+            "profile 2", "guest profile", "local state", "临时人员表.xlsx", "storage_state.json", "trace.jsonl",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for residue in residues:
+                with self.subTest(residue=residue), tempfile.TemporaryDirectory(dir=root) as temporary_bundle:
+                    bundle = Path(temporary_bundle)
+                    component = bundle / "_internal/browser-runtime/chromium-1248"
+                    item = component / "chrome-win64" / residue
+                    item.parent.mkdir(parents=True)
+                    if residue in {"profile 2", "guest profile"}:
+                        item.mkdir()
+                    else:
+                        item.write_bytes(b"fixture")
+                    for check, folder in ((validate_browser_runtime, component), (validate_bundle, bundle)):
+                        with self.assertRaisesRegex(RuntimeError, "Browser runtime contains local data"):
+                            check(folder)
+                    self.assertTrue(item.exists())
+
+    def test_browser_validation_accepts_distribution_resources_and_workbook_templates(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary)
+            runtime = bundle / "_internal/browser-runtime"
+            chromium = runtime / "chromium-1248"
+            for file in (chromium / "INSTALLATION_COMPLETE", chromium / "chrome-win64/chrome.exe",
+                         chromium / "chrome-win64/hyphen-data/manifest.json", chromium / "chrome-win64/icudtl.dat",
+                         chromium / "chrome-win64/locales/zh-CN.pak", runtime / "ffmpeg-1013/ffmpeg-win64.exe",
+                         runtime / "winldd-1007/winldd.exe", bundle / "templates/人员额度模板.xlsx",
+                         bundle / "_internal/templates/人员额度模板.xlsx"):
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.touch()
+            validate_browser_runtime(chromium)
+            validate_bundle(bundle)
 
 
 if __name__ == '__main__':

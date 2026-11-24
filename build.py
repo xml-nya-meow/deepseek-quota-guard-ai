@@ -18,6 +18,19 @@ ROOT = Path(__file__).resolve().parent
 APP_NAME = "DeepSeekQuotaGuardAI"
 PYTHON_VERSIONS = {"3.12.14", "3.13.17"}
 BROWSER_COMPONENTS = ("chromium", "ffmpeg", "winldd")
+BROWSER_DATA_NAMES = {
+    ".links", "%systemdrive%", "%userprofile%", "%appdata%", "%localappdata%", "%programdata%", "programdata",
+    "user data", "default", "guest profile", "system profile", "local state", "preferences", "secure preferences",
+    "bookmarks", "bookmarks.bak", "cache", "cache_data", "cachestorage", "code cache", "gpucache", "shadercache",
+    "crashpad", "crash reports", "sessions", "session storage", "sessionstorage", "local storage", "indexeddb",
+    "service worker", "devtoolsactiveport", "network persistent state", "transportsecurity", "visited links",
+    "top sites", "log", "log.old",
+}
+BROWSER_DATA_FILENAME = re.compile(
+    r"profile \d+|(?:cookies|history|login data(?: for account)?|web data)(?:-(?:journal|wal|shm))?"
+    r"|.+\.(?:db|sqlite3?)(?:-(?:journal|wal|shm))?|.+\.log(?:\.\d+|\.old)?"
+    r"|(?:storage|browser)[_-]state[^/]*\.json|.+\.(?:ldb|har|dmp|jsonl|xlsx?)"
+)
 
 
 def locked_dependencies() -> dict[str, str]:
@@ -42,6 +55,21 @@ def locked_dependencies() -> dict[str, str]:
     return versions
 
 
+def validate_browser_runtime(root: Path) -> None:
+    """Check only the browser assets going into the bundle, including empty profile directories."""
+    pending = [root]
+    while pending:
+        item = pending.pop()
+        name = item.name.casefold()
+        if item.is_symlink() or item.is_junction():
+            raise RuntimeError("Browser runtime contains a filesystem link. Supply a clean Playwright installation.")
+        if name in BROWSER_DATA_NAMES or BROWSER_DATA_FILENAME.fullmatch(name):
+            raise RuntimeError(f"Browser runtime contains local data at {item.relative_to(root)}. "
+                               "Supply a clean Playwright installation.")
+        if item.is_dir():
+            pending.extend(item.iterdir())
+
+
 def browser_components(runtime: Path) -> tuple[list[Path], dict[str, str]]:
     import playwright
 
@@ -56,6 +84,7 @@ def browser_components(runtime: Path) -> tuple[list[Path], dict[str, str]]:
         if not folder.is_dir() or not (folder / "INSTALLATION_COMPLETE").is_file():
             raise RuntimeError(f"Browser component missing or incomplete: {folder.name}. "
                                "Use --install-browser, or supply a matching --runtime directory.")
+        validate_browser_runtime(folder)
         folders.append(folder)
         revisions[name] = revision
 
@@ -142,6 +171,8 @@ def validate_bundle(output: Path) -> None:
                        "OFFLINE-FIXTURE.txt", "ui-smoke.json", "responsibility.sqlite3", "responsibility.anchor.json"}
     forbidden_prefixes = ("运行日志-", "运行摘要-", "状态.db-", "responsibility.sqlite3-")
     for item in output.rglob("*"):
+        if item.name.casefold() == "browser-runtime":
+            validate_browser_runtime(item)
         if item.name in forbidden_names or item.name.startswith(forbidden_prefixes):
             raise RuntimeError("Build contains application data; the output was not published.")
 

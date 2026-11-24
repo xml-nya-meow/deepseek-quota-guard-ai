@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from uuid import uuid4
 
 from playwright.sync_api import sync_playwright
 
@@ -32,9 +33,12 @@ class PortableRecoveryTests(unittest.TestCase):
             chromium = Path(playwright.chromium.executable_path)
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            # Tracking IDs are locked machine-wide. Give this test its own
+            # account, shared by its original and reopened desktop windows.
+            case = dict(cases[-1], seed=uuid4().int)
             with patch.object(operator_acceptance, '_offline_worker', scripted_worker):
-                result = operator_acceptance._one_case(root, cases[-1], root, chromium)
-            self.assertTrue(result['passed'], result.get('error', result))
+                result = operator_acceptance._one_case(root, case, root, chromium)
+            self.assertTrue(result['passed'], (case['seed'], result.get('error', result)))
             self.assertTrue(result['cleanup_passed'])
             self.assertEqual(result['actual_post_count'], 1)
             self.assertEqual(result['actual_cost_queries'], 2)
@@ -42,6 +46,7 @@ class PortableRecoveryTests(unittest.TestCase):
             self.assertEqual([event['status'] for event in result['history']],
                              ['pending', 'requested', 'unknown_result', 'absent_verified'])
             evidence = result['recovery']
+            self.assertEqual(evidence['target_id'], result['initial_review']['tracking_id'])
             self.assertEqual(evidence['kind'], 'desktop_window_reopen')
             self.assertTrue(evidence['first_window_closed'])
             for key in ('before_operation_id', 'reopened_operation_id', 'verified_operation_id'):
@@ -49,6 +54,6 @@ class PortableRecoveryTests(unittest.TestCase):
             for key in ('post_count_before_close', 'post_count_after_reopen', 'post_count_after_verification'):
                 self.assertEqual(evidence[key], 1)
             self.assertGreaterEqual(evidence['fresh_list_receipts'], 1)
-            truth = json.loads((root / cases[-1]['name'] / 'backend-truth.json').read_text(encoding='utf-8'))
+            truth = json.loads((root / case['name'] / 'backend-truth.json').read_text(encoding='utf-8'))
             self.assertEqual(truth['keys'], [k for k in truth['initial_keys']
                                              if k['tracking_id'] != evidence['target_id']])
