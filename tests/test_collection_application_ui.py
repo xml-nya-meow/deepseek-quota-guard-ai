@@ -160,6 +160,17 @@ class CollectionApplicationUiTests(unittest.TestCase):
         self.assertRegex(operation, r'^[0-9a-f]{32}$')
         self.assertEqual(completed['operation_id'], operation)
 
+    def test_partial_new_snapshot_reports_old_threshold_as_incomplete_not_eligible(self):
+        self.read(source='complete', amount='3')
+        browser, _ = self.read(source='partial', totals={'test-key-b': Decimal(6)})
+        self.assertEqual(self.app.rows[0]['status'], 'triggered')
+        self.assertTrue(self.app.rows[0]['spent_is_lower_bound'])
+        review = self.app.fee_review.data
+        self.assertEqual(review.counts(), (2, 0, 1, 0))
+        self.assertIn("下界", review.expense(review.rows[0]))
+        self.assertIn("达线待程序复核 0 人，费用待补全 1 人", self.app.status_var.get())
+        self.assertEqual([action for action, _ in browser.calls], ['collect'])
+
     def test_snapshot_change_outside_collection_invalidates_positive_evidence(self):
         self.read(source='observed', amount='1')
         self.assertTrue(self.app._collection_is_current())

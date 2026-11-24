@@ -23,6 +23,7 @@ from quota_guard.web_operator import (WebOperator, WebOperatorError, OperatorReq
                                       same_cost_request, BASE, EDIT_URL)
 from quota_guard.web_operator import _forward_once
 from quota_guard.platform_http import cost_url
+from quota_guard.operator_runtime import build_messages
 
 
 class ScriptedPublicOperator:
@@ -200,6 +201,85 @@ class OperatorBrowserTests(unittest.TestCase):
         result,_=self.operator._action(action,observation,time.monotonic()+5)
         self.assertEqual(result['status'],'completed');self.assertTrue(result['changed'])
         self.assertEqual(result['value_after'],'2026-01-01')
+
+    def test_public_table_projection_keeps_all_rows_controls_and_date_values(self):
+        self.page.goto(BASE + '/usage')
+        self.page.wait_for_selector('tbody tr')
+        all_ids = [row['tracking_id'] for row in self.platform.keys]
+        self.page.evaluate("""() => {
+            for (const row of document.querySelectorAll('tbody tr')) {
+                row.cells[0].textContent = 'Same name';
+                row.cells[1].textContent = '…';
+                row.cells[2].textContent = 'private-column-sentinel';
+            }
+            const hidden=document.createElement('span');
+            hidden.hidden=true; hidden.textContent='invisible-sentinel';
+            document.querySelector('main').append(hidden);
+        }""")
+        obs = self.operator._observe(include_tables=True)
+
+        def payload(target, mode='table', kind='READ'):
+            task = {'kind': kind, 'target_id': target}
+            return json.loads(build_messages(task, obs, [], read_observation=mode)[1]['content'])
+
+        first = payload(self.platform.target_id)
+        second = payload(self.platform.control_id)
+        for data in (first, second):
+            data.pop('current_task')
+        self.assertEqual(first, second)
+        public = first['observation']
+        self.assertEqual(public['tables'][0]['headers'][0][:3], ['Name', 'Tracking ID', 'Key'])
+        rows = public['tables'][0]['rows']
+        self.assertEqual(len(rows), len(all_ids))
+        self.assertEqual([row['cells'][0] for row in rows], ['Same name'] * len(rows))
+        for row, tracking_id in zip(rows, all_ids):
+            self.assertIn(tracking_id, row['cells'][1])
+            self.assertEqual(row['cells'][2], '[KEY REDACTED]')
+            self.assertEqual([ctl['text'] for ctl in row['controls']], ['Read cost'])
+        global_controls = public['controls']
+        dates = {ctl['text']: ctl['value'] for ctl in global_controls if 'value' in ctl}
+        self.assertEqual(dates, {'Start date': self.platform.today, 'End date': self.platform.today})
+        references = [ctl['ref'] for ctl in global_controls]
+        references.extend(ctl['ref'] for row in rows for ctl in row['controls'])
+        self.assertCountEqual(references, [node['ref'] for node in obs['nodes']])
+        self.assertNotIn('private-column-sentinel', json.dumps(first))
+        self.assertNotIn('invisible-sentinel', json.dumps(first))
+        flat = payload(self.platform.target_id, 'flat')
+        self.assertNotIn('tables', flat['observation'])
+        self.assertEqual(flat['allowed_next_action_schema'], first['allowed_next_action_schema'])
+        self.assertEqual(payload(self.platform.target_id, 'flat', 'DELETE'),
+                         payload(self.platform.target_id, 'table', 'DELETE'))
+
+    def test_table_action_rejects_changed_column_identity(self):
+        self.page.goto(BASE + '/usage')
+        self.page.wait_for_selector('tbody tr')
+        obs = self.operator._observe(include_tables=True)
+        node = next(n for n in obs['nodes'] if n['text'] == 'Read cost')
+        self.page.evaluate("document.querySelector('thead th').textContent='Alias'")
+        with self.assertRaises(WebOperatorError) as caught:
+            self.operator._action({'tool':'act_on_node','arguments':{'ref':node['ref'],'action':'click'}},
+                                  obs, time.monotonic() + 5)
+        self.assertEqual(caught.exception.reason_code, 'AI_OPERATOR_STALE_REFERENCE')
+        self.assertFalse([e for e in self.platform.events if e['kind']=='cost_read'])
+
+    def test_table_read_uses_exact_row_handle_through_ordinary_request_gate(self):
+        class PublicTableReader:
+            read_observation = 'table'
+
+            def decide(self, task, observation, history, *, deadline):
+                content = build_messages(task, observation, history, read_observation=self.read_observation)
+                table = json.loads(content[1]['content'])['observation']['tables'][0]
+                column = table['headers'][0].index('Tracking ID')
+                row = next(row for row in table['rows'] if row['cells'][column] == task['target_ids'][0])
+                return {'tool':'act_on_node','arguments':{'ref':row['controls'][0]['ref'],'action':'click'}}
+
+        operator = WebOperator(self.page, PublicTableReader())
+        for tracking_id in (self.platform.target_id, self.platform.control_id):
+            operator.read_cost(self.platform.today, self.platform.today, [tracking_id],
+                               deadline=time.monotonic() + 10)
+        reads = [event['ids'] for event in self.platform.events if event['kind'] == 'cost_read']
+        self.assertEqual(reads, [[self.platform.target_id], [self.platform.control_id]])
+        self.assertFalse(self.writes())
 
     def test_delayed_duplicate_post_cannot_escape_completed_stage(self):
         original=self.platform.handle

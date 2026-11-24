@@ -195,6 +195,13 @@ class Config:
             return (self.total_budget / self.people_count).to_integral_value(rounding=ROUND_FLOOR)
 
 
+def eligible_for_automatic_action(row: dict, *, fees_current: bool = True) -> bool:
+    """Select a bound quota candidate; the caller still checks identity and freshness."""
+    return (row.get("status") == "triggered" and bool(row.get("tracking_id"))
+            and (row.get("amount") == Decimal(0) or row.get("share") == Decimal(0)
+                 or (fees_current and row.get("complete") is True)))
+
+
 class DataStore:
     CONFIG = "管理设置.json"
     WORKBOOK = "人员额度.xlsx"

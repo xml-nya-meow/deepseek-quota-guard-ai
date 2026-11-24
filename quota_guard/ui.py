@@ -17,12 +17,13 @@ import threading
 import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from typing import Any, Callable
+from typing import Callable
 from uuid import uuid4
 
 from . import __version__
 from .core import (AccountMismatch, DataStore, GuardError, Person, SnapshotApplyError,
-                   clean_name, money, validate_key_periods)
+                   clean_name, eligible_for_automatic_action, money, validate_key_periods)
+from .fee_review import FeeReviewData, FeeReviewFrame, amount_text
 from .declared_recovery import DeclaredRecoveryClosed
 from .build_identity import diagnostic_build_identity
 from .revocation_permit import KeyInspectionError, RevocationNotSubmitted
@@ -121,26 +122,6 @@ def collection_is_fresh(observed_wall, observed_monotonic, end_date,
             and 0 <= monotonic_age < COLLECTION_MAX_AGE_SECONDS
             and abs(wall_age - monotonic_age) <= 5
             and end_date == datetime.fromtimestamp(wall_now, TZ).date().isoformat())
-
-
-def eligible_for_automatic_action(row: dict) -> bool:
-    """A historical lower bound may be displayed, but cannot authorize deletion."""
-    return (row.get("status") == "triggered" and bool(row.get("tracking_id"))
-            and (row.get("amount") == Decimal(0) or row.get("share") == Decimal(0)
-                 or row.get("complete") is True))
-
-
-def amount_text(value: Any) -> str:
-    """Display full supplied precision, rather than hide a threshold crossing."""
-    if value is None:
-        return "未知"
-    try:
-        number = Decimal(str(value))
-        if not number.is_finite():
-            return "未知"
-        return format(number, "f")
-    except (ValueError, InvalidOperation):
-        return "未知"
 
 
 def safe_error(exc: Exception | str) -> str:
@@ -243,6 +224,7 @@ class App:
         self.collection_observed_wall = None
         self.collection_observed_monotonic = None
         self.collection_end_date = None
+        self.review_periods = {}
         self.action_states = {}
         self.button_labels = {}
         self.pending_login = False
@@ -397,7 +379,11 @@ class App:
         overview = ttk.Frame(tabs, padding=8)
         reports = ttk.Frame(tabs, padding=8)
         tabs.add(overview, text="人员与额度")
+        self.review_tabs = tabs
+        self.fee_review = FeeReviewFrame(tabs, on_start=lambda: self.buttons["start"].invoke())
+        tabs.add(self.fee_review, text="费用核对")
         tabs.add(reports, text="处理汇报")
+        tabs.bind("<<NotebookTabChanged>>", self._review_tab_changed)
         columns = ("name", "amount", "share", "spent", "status")
         self.tree = ttk.Treeview(overview, columns=columns, show="headings", selectmode="browse", height=7)
         for col, title, width in zip(columns, ["API名 / 人员名", "个人额度（元）", "公共额度（元）", "累计费用（元）", "当前状态"], [190, 150, 150, 150, 270]):
@@ -482,6 +468,8 @@ class App:
             if self.recovery_mode and key == "import_people":
                 label = "恢复人员 Excel"
             button.configure(text=label, state="normal" if enabled else "disabled")
+        start = self.buttons["start"]
+        self.fee_review.start_button.configure(text=start.cget("text"), state=start.cget("state"))
 
     def _refresh_theme(self):
         theme = resolve_theme(self.theme_mode)
@@ -757,6 +745,7 @@ class App:
         self.collection_observed_monotonic = None
         self.collection_end_date = None
         self.collection_has_fees = False
+        self.review_periods = {}
         self.collection_source_id = ''
         self.collection_reason_code = ''
         self.action_states["collect"] = "待重新读取"
@@ -772,6 +761,46 @@ class App:
         variable = getattr(self, 'collection_summary_var', None)
         if variable is not None:
             variable.set(text)
+            self._refresh_fee_review()
+
+    def _review_tab_changed(self, _event):
+        if not self.closing and self.review_tabs.select() == str(self.fee_review):
+            self._refresh_fee_review()
+
+    def _refresh_fee_review(self, *, select=False):
+        if not self.config:
+            self.fee_review.clear()
+            return
+        try:
+            current = self.session_ready and self._collection_is_current()
+        except (GuardError, OSError):
+            current = False
+        account = self.config.account_id
+        identity = "账户与当前账本已核验" if current else "账户待本次核验"
+        if account:
+            identity += " · 标识尾段 " + account[-8:]
+        period = ("各 Key 创建以来累计（UTC+8）" if self.config.fee_basis == "key_lifetime"
+                  else f"自 {self.config.start_date} 起累计（UTC+8）")
+        if self.collection_observed_wall is not None:
+            when = datetime.fromtimestamp(self.collection_observed_wall, TZ).strftime("%Y-%m-%d %H:%M:%S")
+            observed = f"本轮采样于 {when}（UTC+8） · 查询至 {self.collection_end_date}"
+            if not current:
+                observed += " · 读取已失效，须重新核验"
+        else:
+            observed = "本轮尚无有效采样，已有金额按历史记录显示。"
+        rows = []
+        for row in self.rows:
+            key_period = self.review_periods.get(row.get("tracking_id"))
+            if key_period:
+                row = dict(row, start_date=key_period["start_date"], end_date=key_period["end_date"])
+            rows.append(row)
+        self.fee_review.show(FeeReviewData(tuple(rows), self.config.total_budget, self.config.people_count,
+            self.config.share, period, identity, observed, current, current and self.collection_has_fees,
+            self.collection_summary_var.get()))
+        if select:
+            self.review_tabs.select(self.fee_review)
+            outer = self.main_content
+            outer.canvas.yview_moveto(self.review_tabs.winfo_y() / max(1, outer.content.winfo_height()))
 
     def _saved_fee_fact(self):
         """A historical UI fact only; never grants or refreshes permission."""
@@ -888,6 +917,10 @@ class App:
             self._invalidate_collection()
             self.error('数据需要核查', exc, dialog=False)
         finally:
+            if (self.fee_review.data and self.fee_review.data.identity_current
+                    and not collection_is_fresh(self.collection_observed_wall, self.collection_observed_monotonic,
+                                                self.collection_end_date)):
+                self._refresh_fee_review()
             self._arm_lifecycle_timer('workbook_timer', 1000, self._watch_workbook)
 
     def error(self, title: str, exc: Exception | str, *, dialog=True, next_step=""):
@@ -1440,6 +1473,7 @@ class App:
             if row.get('spent_is_lower_bound') and row.get('spent') is not None:
                 spent = '≥' + spent + '（待补全）'
             self.tree.insert("", "end", iid=str(i), values=(row.get("name") or "（待填写）", amount, amount_text(row.get("share", self.config.share)), spent, STATUS_LABELS.get(status, status)), tags=(status,))
+        self._refresh_fee_review()
 
     def refresh_events(self, *, show_status=False, strict=False):
         if not self.store or not self.config:
@@ -1823,6 +1857,7 @@ class App:
         if self.recovery_mode or self.busy or not self.config or self.pending_login or self.pending_change is not None or self.closing or self.interrupting or self.cleanup_failed or self.audit_failed:
             return
         self._cancel_collection_poll()
+        show_review = not self.observing and after_read is None
         if not self.check_people(show_dialog=False, allow_empty=True):
             self.stop(quiet=True)
             return
@@ -1846,6 +1881,7 @@ class App:
             self._show_collection_summary('费用核验：没有已填写且额度不为 -1 的 Key；未发送费用请求。')
             self.status_var.set('未填写或额度为 -1 的行不查询费用、不参与自动管理。')
             self._diagnostic('cost_collection_skipped', reason_code='NO_MANAGED_KEYS', count=0)
+            self._refresh_fee_review(select=show_review)
             return
         requested_start = requested_context[4]
         requested_basis = requested_context[8]
@@ -1933,6 +1969,7 @@ class App:
                             raise SnapshotApplyError(str(exc), reason_code='KEY_CREATION_EVIDENCE_INVALID',
                                 stage='identity_refresh', persistence_state='not_written') from exc
                     self._remember_collection(result)
+                    self.review_periods = lifetime_periods or {}
                 reason = incoming_reason
                 self.collection_reason_code = reason
                 self._action_state("collect", FEE_STATE_LABELS.get(reason, "读取未完成"))
@@ -1959,6 +1996,7 @@ class App:
                 if reason in {'AUTH_REQUIRED', 'SESSION_UNAVAILABLE', 'REDIRECT_REJECTED'}:
                     self.stop(quiet=True)
                     self._invalidate_collection(session=True)
+                self._refresh_fee_review(select=show_review)
                 if self.observing:
                     self._schedule_processing()
                 if after_read is not None:
@@ -1987,6 +2025,7 @@ class App:
             self.refresh_events(strict=True)
             state['stage'] = 'post_commit_context'
             self._remember_collection(result, application=application)
+            self.review_periods = lifetime_periods or {}
             state['stage'] = 'collection_publication'
             self._action_state("collect", "成功")
             self.collection_reason_code = 'OK'
@@ -2000,9 +2039,9 @@ class App:
                                    persistence_state='persisted', application=application)
             self._record_forecast_shadow(result)
             now = datetime.now(TZ).strftime("%H:%M:%S")
-            reached = sum(row.get("status") == "triggered" for row in self.rows)
-            unknown = sum(row.get('status') == 'unknown' for row in self.rows)
-            self.status_var.set(f"费用读取成功 {now}（UTC+8）｜{reached} 人达到额度，{unknown} 人费用未完整。" + (f"全自动管理已开启，本轮处理完成后等待 {self.poll_interval_seconds} 秒。" if self.observing else "全自动管理未开启，可点击“启动全自动管理”。"))
+            self._refresh_fee_review(select=show_review)
+            _, _, incomplete, reached = self.fee_review.data.counts()
+            self.status_var.set(f"费用读取成功 {now}（UTC+8）｜达线待程序复核 {reached} 人，费用待补全 {incomplete} 人。" + (f"全自动管理已开启，本轮处理完成后等待 {self.poll_interval_seconds} 秒。" if self.observing else "全自动管理未开启，可点击“启动全自动管理”。"))
             if reached:
                 self.root.bell()
             if self.observing:
@@ -2089,14 +2128,16 @@ class App:
                             '\n此处不会自动创建登记，也没有执行任何删除。')
             self._start_blocked('shared_responsibility', reason, message, dialog=True)
             return
-        managed = [p.name for p in self.store.read_people() if p.name and p.amount >= 0]
+        self._refresh_fee_review(select=True)
+        managed, skipped, incomplete, candidates = self.fee_review.data.counts()
         fees_note = ("\n当前费用尚未就绪：费用未核验，仅零额度可处理；正额度人员的未知费用不会按零元计算。\n" if not self.collection_has_fees else "")
         confirmation_generation = self.management_generation
         confirmation_store = self.store
         confirmation_hash = self.validated_hash
         confirmation_context = self.collection_context
         if not messagebox.askyesno('启动全自动管理（含自动撤销）',
-            '管理人员：' + '、'.join(managed) + '\n\n本次开启后，达到个人额度或公共额度（含 0 元）时，将自动永久撤销对应 Key，无需逐枚人工审批。-1 和表格外的 Key 不参与。\n'
+            f'纳入管理 {managed} 人，跳过 {skipped} 行。费用待补全 {incomplete} 人，当前达线待程序复核 {candidates} 人。\n'
+            + self.fee_review.data.budget_text + '\n\n本次开启后，达到个人额度或公共额度（含 0 元）时，将自动永久撤销对应 Key，无需逐枚人工审批。-1 和表格外的 Key 不参与。\n'
             '撤销不可恢复；账单延迟与在途请求可能导致超支。身份、表格、页面结构或结果无法核实时会停止；结果不明不会自动重试。' + fees_note + '\n\n启动本次全自动管理？', parent=self.root):
             self._start_blocked('confirmation', 'START_CANCELLED', '已取消本次启动。')
             return
@@ -2318,9 +2359,7 @@ class App:
             self.queue_summary_var.set('候选队列已阻塞，须先核实原操作结果。')
             self.status_var.set('有上次操作待核实，请先选中对应人员并点击“核实平台状态”。')
             return
-        targets = [row for row in self.rows if eligible_for_automatic_action(row)]
-        if not self.collection_has_fees:
-            targets = [row for row in targets if Decimal(str(row['amount'])) == 0 or Decimal(str(row['share'])) == 0]
+        targets = [row for row in self.rows if eligible_for_automatic_action(row, fees_current=self.collection_has_fees)]
         stamp = time.monotonic()
         scope = (self.management_generation, *self._collection_context())
         self.candidate_queue.sync(targets, scope=scope, now=stamp)

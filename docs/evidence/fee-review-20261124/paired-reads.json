@@ -1,0 +1,464 @@
+{
+  "scope": "READ through Chromium, production WebOperator and local 4B; synthetic HTTP only",
+  "day": "2026-11-24",
+  "page_seed": 7719,
+  "model_sha256": "2fde00ce69dd4899c70d020845e2638353015bba0fdf161b3eb965f2bca4464e",
+  "asset_lock_sha256": "f993de2b3e39e0639a3709adfbc54ca7ec66177edc83b6cad0c08f8ef527dd74",
+  "config": {
+    "threads": 4,
+    "context": 8192,
+    "max_output_tokens": 256,
+    "temperature": 0.7,
+    "top_p": 0.8,
+    "top_k": 20,
+    "min_p": 0,
+    "generation_seed": 17,
+    "step_timeout_seconds": 60,
+    "startup_timeout_seconds": 120,
+    "cache_prompt": false
+  },
+  "system_sha256": "0fd2c00aa4e94ac0e618f94d2a89c07fcd2fbb3486ad254a630b2418d3d0e93f",
+  "stage_seconds": 180,
+  "case_order": [
+    [
+      "flat",
+      "Cedar"
+    ],
+    [
+      "table",
+      "Cedar"
+    ],
+    [
+      "table",
+      "Maple"
+    ],
+    [
+      "flat",
+      "Maple"
+    ]
+  ],
+  "html_sha256": "75b7862eaa2441c2025123fdc5952f80506c2879de24590a675d7a3e7a470273",
+  "rows": [
+    {
+      "name": "DeepSeek Harness",
+      "id": "10e8f47c-54b6-4781-b6a4-34e1b7365b5a",
+      "kind": "DSH"
+    },
+    {
+      "name": "Cedar",
+      "id": "a794682b-0bc8-4cb7-b301-4284416ecb77",
+      "kind": "NORMAL"
+    },
+    {
+      "name": "Maple",
+      "id": "e19a88cd-7d4a-443f-8a59-61da4f3751a9",
+      "kind": "NORMAL"
+    }
+  ],
+  "sources_sha256": {
+    "compare_read_observations.py": "3caa9fd4288858024a3dc2ac0c1a6cc5f93f3a0267df9cb00cede40c86d3bcfc",
+    "web_operator.py": "74226933d5387c84ff46dc5e785e885086cd3b33f55991b955b5c65cf01ff47f",
+    "operator_runtime.py": "af6b6a63d1db905633de03a35df72640482dc76e0cd85e2ba031c4a4473edd93",
+    "operator_contract.py": "1bb067cbe5b0d99741770ab3a6295a08b167a20201d0d5ef78f09adbc63b6517",
+    "operator_fixture.py": "d073ed4fc657d418c4b7df4430f913acf919261fda7e0cd51b984627fb759ddd"
+  },
+  "cases": [
+    {
+      "mode": "flat",
+      "target": "Cedar",
+      "tracking_id": "a794682b-0bc8-4cb7-b301-4284416ecb77",
+      "steps": [
+        {
+          "step": 1,
+          "metrics": {
+            "prompt_tokens": 1845,
+            "output_tokens": 37,
+            "elapsed_ms": 20453
+          },
+          "action": {
+            "tool": "act_on_node",
+            "arguments": {
+              "ref": "obs-1-1-n3",
+              "action": "type",
+              "value": "2026-11-24"
+            }
+          },
+          "selected_control": {
+            "text": "Start date",
+            "tag": "input",
+            "context": "Start date | End date"
+          }
+        },
+        {
+          "step": 2,
+          "metrics": {
+            "prompt_tokens": 1995,
+            "output_tokens": 24,
+            "elapsed_ms": 21360
+          },
+          "action": {
+            "tool": "act_on_node",
+            "arguments": {
+              "ref": "obs-1-2-n6",
+              "action": "click"
+            }
+          },
+          "selected_control": {
+            "text": "Read cost",
+            "tag": "button",
+            "context": "Cedar | a794682b-0bc8-4cb7-b301-4284416ecb77 | [KEY REDACTED] | 2026-11-23 | - | Read cost a794682b-0bc8-4cb7-b301-4284416ecb77"
+          }
+        }
+      ],
+      "startup_seconds": 3.422,
+      "parsed_amount": "1.25",
+      "read_seconds": 42.078,
+      "elapsed_seconds": 45.828,
+      "gate_events": [
+        {
+          "event": "operator_stage_navigation",
+          "phase": "READ",
+          "action": "navigate"
+        },
+        {
+          "event": "operator_model_action",
+          "phase": "READ",
+          "action": "type",
+          "step": 0
+        },
+        {
+          "event": "operator_model_action",
+          "phase": "READ",
+          "action": "click",
+          "step": 1
+        },
+        {
+          "event": "operator_cost_response_observed",
+          "phase": "READ",
+          "bytes": 341,
+          "http_status": 200
+        }
+      ],
+      "first_input_without_target_sha256": "d368d5fbe23f187d9a3fca154b99e3acd4c5dbfc775f9ac9171f3704b778b4c8",
+      "cost_requests": [
+        {
+          "kind": "cost_read",
+          "monotonic": 274055.296,
+          "ids": [
+            "a794682b-0bc8-4cb7-b301-4284416ecb77"
+          ],
+          "source": "browser",
+          "start": [
+            "1795449600"
+          ],
+          "end": [
+            "1795536000"
+          ]
+        }
+      ],
+      "write_count": 0,
+      "correct_target_gets": 1,
+      "wrong_scope_gets": 0,
+      "read_succeeded": true
+    },
+    {
+      "mode": "table",
+      "target": "Cedar",
+      "tracking_id": "a794682b-0bc8-4cb7-b301-4284416ecb77",
+      "steps": [
+        {
+          "step": 1,
+          "metrics": {
+            "prompt_tokens": 1522,
+            "output_tokens": 37,
+            "elapsed_ms": 17625
+          },
+          "action": {
+            "tool": "act_on_node",
+            "arguments": {
+              "ref": "obs-1-1-n3",
+              "action": "type",
+              "value": "2026-11-24"
+            }
+          },
+          "selected_control": {
+            "text": "Start date",
+            "tag": "input",
+            "context": "Start date | End date"
+          }
+        },
+        {
+          "step": 2,
+          "metrics": {
+            "prompt_tokens": 1672,
+            "output_tokens": 24,
+            "elapsed_ms": 18219
+          },
+          "action": {
+            "tool": "act_on_node",
+            "arguments": {
+              "ref": "obs-1-2-n6",
+              "action": "click"
+            }
+          },
+          "selected_control": {
+            "text": "Read cost",
+            "tag": "button",
+            "context": "Cedar | a794682b-0bc8-4cb7-b301-4284416ecb77 | [KEY REDACTED] | 2026-11-23 | - | Read cost a794682b-0bc8-4cb7-b301-4284416ecb77"
+          }
+        }
+      ],
+      "startup_seconds": 3.656,
+      "parsed_amount": "1.25",
+      "read_seconds": 36.11,
+      "elapsed_seconds": 40.078,
+      "gate_events": [
+        {
+          "event": "operator_stage_navigation",
+          "phase": "READ",
+          "action": "navigate"
+        },
+        {
+          "event": "operator_model_action",
+          "phase": "READ",
+          "action": "type",
+          "step": 0
+        },
+        {
+          "event": "operator_model_action",
+          "phase": "READ",
+          "action": "click",
+          "step": 1
+        },
+        {
+          "event": "operator_cost_response_observed",
+          "phase": "READ",
+          "bytes": 341,
+          "http_status": 200
+        }
+      ],
+      "first_input_without_target_sha256": "3935735c46b39fba2942eb0ae84f2996ff369adaa58414984da1064233816374",
+      "cost_requests": [
+        {
+          "kind": "cost_read",
+          "monotonic": 274095.468,
+          "ids": [
+            "a794682b-0bc8-4cb7-b301-4284416ecb77"
+          ],
+          "source": "browser",
+          "start": [
+            "1795449600"
+          ],
+          "end": [
+            "1795536000"
+          ]
+        }
+      ],
+      "write_count": 0,
+      "correct_target_gets": 1,
+      "wrong_scope_gets": 0,
+      "read_succeeded": true
+    },
+    {
+      "mode": "table",
+      "target": "Maple",
+      "tracking_id": "e19a88cd-7d4a-443f-8a59-61da4f3751a9",
+      "steps": [
+        {
+          "step": 1,
+          "metrics": {
+            "prompt_tokens": 1524,
+            "output_tokens": 37,
+            "elapsed_ms": 16907
+          },
+          "action": {
+            "tool": "act_on_node",
+            "arguments": {
+              "ref": "obs-1-1-n3",
+              "action": "type",
+              "value": "2026-11-24"
+            }
+          },
+          "selected_control": {
+            "text": "Start date",
+            "tag": "input",
+            "context": "Start date | End date"
+          }
+        },
+        {
+          "step": 2,
+          "metrics": {
+            "prompt_tokens": 1674,
+            "output_tokens": 24,
+            "elapsed_ms": 17750
+          },
+          "action": {
+            "tool": "act_on_node",
+            "arguments": {
+              "ref": "obs-1-2-n7",
+              "action": "click"
+            }
+          },
+          "selected_control": {
+            "text": "Read cost",
+            "tag": "button",
+            "context": "Maple | e19a88cd-7d4a-443f-8a59-61da4f3751a9 | [KEY REDACTED] | 2026-11-23 | - | Read cost e19a88cd-7d4a-443f-8a59-61da4f3751a9"
+          }
+        }
+      ],
+      "startup_seconds": 3.532,
+      "parsed_amount": "1.25",
+      "read_seconds": 34.922,
+      "elapsed_seconds": 38.75,
+      "gate_events": [
+        {
+          "event": "operator_stage_navigation",
+          "phase": "READ",
+          "action": "navigate"
+        },
+        {
+          "event": "operator_model_action",
+          "phase": "READ",
+          "action": "type",
+          "step": 0
+        },
+        {
+          "event": "operator_model_action",
+          "phase": "READ",
+          "action": "click",
+          "step": 1
+        },
+        {
+          "event": "operator_cost_response_observed",
+          "phase": "READ",
+          "bytes": 341,
+          "http_status": 200
+        }
+      ],
+      "first_input_without_target_sha256": "3935735c46b39fba2942eb0ae84f2996ff369adaa58414984da1064233816374",
+      "cost_requests": [
+        {
+          "kind": "cost_read",
+          "monotonic": 274134.328,
+          "ids": [
+            "e19a88cd-7d4a-443f-8a59-61da4f3751a9"
+          ],
+          "source": "browser",
+          "start": [
+            "1795449600"
+          ],
+          "end": [
+            "1795536000"
+          ]
+        }
+      ],
+      "write_count": 0,
+      "correct_target_gets": 1,
+      "wrong_scope_gets": 0,
+      "read_succeeded": true
+    },
+    {
+      "mode": "flat",
+      "target": "Maple",
+      "tracking_id": "e19a88cd-7d4a-443f-8a59-61da4f3751a9",
+      "steps": [
+        {
+          "step": 1,
+          "metrics": {
+            "prompt_tokens": 1847,
+            "output_tokens": 37,
+            "elapsed_ms": 20485
+          },
+          "action": {
+            "tool": "act_on_node",
+            "arguments": {
+              "ref": "obs-1-1-n3",
+              "action": "type",
+              "value": "2026-11-24"
+            }
+          },
+          "selected_control": {
+            "text": "Start date",
+            "tag": "input",
+            "context": "Start date | End date"
+          }
+        },
+        {
+          "step": 2,
+          "metrics": {
+            "prompt_tokens": 1997,
+            "output_tokens": 24,
+            "elapsed_ms": 21359
+          },
+          "action": {
+            "tool": "act_on_node",
+            "arguments": {
+              "ref": "obs-1-2-n7",
+              "action": "click"
+            }
+          },
+          "selected_control": {
+            "text": "Read cost",
+            "tag": "button",
+            "context": "Maple | e19a88cd-7d4a-443f-8a59-61da4f3751a9 | [KEY REDACTED] | 2026-11-23 | - | Read cost e19a88cd-7d4a-443f-8a59-61da4f3751a9"
+          }
+        }
+      ],
+      "startup_seconds": 3.421,
+      "parsed_amount": "1.25",
+      "read_seconds": 42.079,
+      "elapsed_seconds": 45.781,
+      "gate_events": [
+        {
+          "event": "operator_stage_navigation",
+          "phase": "READ",
+          "action": "navigate"
+        },
+        {
+          "event": "operator_model_action",
+          "phase": "READ",
+          "action": "type",
+          "step": 0
+        },
+        {
+          "event": "operator_model_action",
+          "phase": "READ",
+          "action": "click",
+          "step": 1
+        },
+        {
+          "event": "operator_cost_response_observed",
+          "phase": "READ",
+          "bytes": 341,
+          "http_status": 200
+        }
+      ],
+      "first_input_without_target_sha256": "d368d5fbe23f187d9a3fca154b99e3acd4c5dbfc775f9ac9171f3704b778b4c8",
+      "cost_requests": [
+        {
+          "kind": "cost_read",
+          "monotonic": 274180.203,
+          "ids": [
+            "e19a88cd-7d4a-443f-8a59-61da4f3751a9"
+          ],
+          "source": "browser",
+          "start": [
+            "1795449600"
+          ],
+          "end": [
+            "1795536000"
+          ]
+        }
+      ],
+      "write_count": 0,
+      "correct_target_gets": 1,
+      "wrong_scope_gets": 0,
+      "read_succeeded": true
+    }
+  ],
+  "chromium_version": "156.0.8078.4",
+  "goal_swaps_equal_except_target": {
+    "flat": true,
+    "table": true
+  }
+}

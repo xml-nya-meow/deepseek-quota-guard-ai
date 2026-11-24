@@ -1,0 +1,30 @@
+{
+  "baseline": "799fac2befeafdff2e7031ac58b2dcae694251f9",
+  "tested_on": "Windows x64",
+  "python": "3.12.14",
+  "pyinstaller": "6.22.3",
+  "local_regression": {
+    "tests": 1387,
+    "seconds": 452.889,
+    "skipped": 0,
+    "log_sha256": "13146ef9e36ee2e45f8ddf0b29bc5ddd4a705b1292c08df85810ea065c283b33"
+  },
+  "viewer": {
+    "file": "额度核对预览.exe",
+    "bytes": 14885091,
+    "sha256": "b510c6a7b4a78ac89f661fd71de834f00c0d106265763c0276dbfa331e3d6c1a",
+    "window_capture_sha256": "7e5f0f34f7338e9a0593b2f5f5c7580ba3e04d5b61b9039aa6dc6b3bc3b50c4d",
+    "screenshot_dimensions": [
+      1040,
+      680
+    ],
+    "three_scenes_rendered": true,
+    "normal_launch_and_close": true,
+    "clean_temp_system32_only_path": true,
+    "files_left_in_isolated_temp": 0
+  },
+  "paired_read_evidence_sha256": "501b7de121fa1fbee5be76ec17cee8934081d2ef1a0de8612840e8e8e03445db",
+  "paired_harness_note": "One trailing blank line was removed from the benchmark script after the run. Restoring one LF reproduces the recorded raw script hash.",
+  "desktop_read_evidence_sha256": "9af10dfd10ab84cdad258af8750810cced2f80735745ad10fed6b65860da2de9",
+  "scope": "Offline synthetic accounts, data and read-only fixture. No live platform or automatic revocation acceptance."
+}

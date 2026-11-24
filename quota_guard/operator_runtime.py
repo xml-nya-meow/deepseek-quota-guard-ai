@@ -203,10 +203,36 @@ def _scrub(value):
     return value
 
 
-def build_messages(task, observation, previous):
+def _public_table_observation(public, layout):
+    """Group public controls by their actual DOM rows. The task is never an input."""
+    if not isinstance(layout, dict):
+        raise OperatorError('AI_INPUT_INVALID')
+    nodes = public.pop('nodes')
+    controls = [{key: value for key, value in node.items() if key != 'context' and value is not None}
+                for node in nodes]
+    inside = set()
+    tables = []
+    for captured in layout['tables']:
+        rows = []
+        for row in captured['rows']:
+            indices = row['control_indices']
+            rows.append({'cells': row['cells'], 'controls': [controls[i] for i in indices]})
+            inside.update(indices)
+        tables.append({'headers': captured['headers'], 'rows': rows})
+    outside = []
+    for index, control in enumerate(controls):
+        if index not in inside:
+            context = layout['outside_contexts'][index]
+            if context:
+                control['context'] = context
+            outside.append(control)
+    public.update(page_text=layout['page_text'], controls=outside, tables=tables)
+
+
+def build_messages(task, observation, previous, *, read_observation='flat'):
     if not isinstance(task, dict) or not isinstance(observation, dict) or not isinstance(previous, (list, tuple)):
         raise OperatorError('AI_INPUT_INVALID')
-    if task.get('kind') not in ('READ', 'DELETE'):
+    if task.get('kind') not in ('READ', 'DELETE') or read_observation not in ('flat', 'table'):
         raise OperatorError('AI_INPUT_INVALID')
     ids = task.get('target_ids')
     if ids is None:
@@ -220,6 +246,8 @@ def build_messages(task, observation, previous):
     public = {key: observation.get(key) for key in ('observation_ref', 'document_epoch', 'url', 'page_text',
               'nodes', 'dialog', 'action_state', 'readiness')}
     try:
+        if read_observation == 'table' and task['kind'] == 'READ' and not public['dialog']:
+            _public_table_observation(public, observation.get('table_layout'))
         location = urllib.parse.urlsplit(public.get('url') or '')
         public['url'] = urllib.parse.urlunsplit((location.scheme, location.netloc, location.path, '', ''))
         selected_task = {key: task[key] for key in ('kind', 'target_id', 'target_ids', 'instruction', 'date_range') if key in task}
@@ -329,7 +357,10 @@ class OperatorRuntime:
     close/timeout makes this object permanently stopped. A subsequent explicit
     management session creates another object; there is no implicit retry/restart.
     """
-    def __init__(self, assets=None, state_dir=None, emit=None):
+    def __init__(self, assets=None, state_dir=None, emit=None, *, read_observation='flat'):
+        if read_observation not in ('flat', 'table'):
+            raise OperatorError('AI_INPUT_INVALID')
+        self.read_observation = read_observation
         self.assets_root = Path(assets) if assets is not None else assets_directory()
         self.state_dir = Path(state_dir) if state_dir is not None else None
         self.emit = emit
@@ -432,7 +463,7 @@ class OperatorRuntime:
         try:
             if self.closed:
                 raise OperatorError('AI_RUNTIME_CLOSED')
-            messages = build_messages(task, observation, history)
+            messages = build_messages(task, observation, history, read_observation=self.read_observation)
             if not self.ready:
                 self.start(deadline=deadline)
             step_deadline = min(deadline, time.monotonic() + CONFIG['step_timeout_seconds'])

@@ -99,12 +99,35 @@ class StartFeedbackTests(unittest.TestCase):
         self.assertEqual(self.driver.browser.calls, ['collect'])
         self.assertEqual(self.driver.browser.sends, 0)
 
+    def test_manual_read_opens_passive_review_and_its_start_uses_existing_confirmation(self):
+        self.collect()
+        review = self.app.fee_review
+        self.assertEqual(self.app.review_tabs.select(), str(review))
+        self.assertEqual(review.data.counts(), (1, 0, 0, 0))
+        self.assertTrue(review.data.identity_current)
+        self.assertIn("100", review.data.budget_text)
+        review.search.set(self.target)
+        self.assertEqual(len(review.tree.get_children()), 1)
+        self.assertFalse(self.app.observing)
+        self.assertEqual(self.driver.browser.calls, ['collect'])
+        self.initialize()
+        with patch('quota_guard.ui.messagebox.askyesno', return_value=False) as confirm:
+            review.start_button.invoke()
+        self.assertEqual(confirm.call_count, 1)
+        self.assertIn("纳入管理 1 人", confirm.call_args.args[1])
+        self.assert_blocked('confirmation', 'START_CANCELLED')
+        self.assertEqual(self.driver.browser.calls, ['collect'])
+
     def test_session_and_stale_fees_have_distinct_diagnostics_before_registry(self):
         self.app.start()
         self.assert_blocked('identity', 'SESSION_NOT_VERIFIED')
         self.collect()
         self.app.collection_observed_wall = time.time() - 400
         self.app.collection_observed_monotonic = time.monotonic() - 400
+        self.app._watch_workbook()
+        self.assertFalse(self.app.fee_review.data.identity_current)
+        self.assertFalse(self.app.fee_review.data.fees_current)
+        self.assertIn('读取已失效', self.app.fee_review.data.observed_text)
         self.app.start()
         self.assert_blocked('collection', 'COLLECTION_NOT_CURRENT')
         self.assertFalse(self.directory.exists())

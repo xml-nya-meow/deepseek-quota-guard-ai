@@ -340,23 +340,25 @@ class OperatorRequestGate:
 # This observer never uses the task target. Secret cells are removed by their
 # column heading before text extraction; known credential patterns are scrubbed
 # again as defense in depth. Full IDs come only from the public Tracking field.
-_OBSERVE_JS = r"""() => {
+_OBSERVE_JS = r"""(includeTables = false) => {
  const visible=e=>e.isConnected&&e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden';
  const scrub=s=>(s||'').replace(/sk-[A-Za-z0-9_*.-]+/gi,'[KEY REDACTED]').replace(/Bearer\s+[^\s,;"<>]+/gi,'[AUTH REDACTED]');
+ const privateHeading = label => /^(?:key|secret|api[ _-]?key|密钥|金鑰)$/i.test((label || '').trim());
  const secretCell=e=>{const td=e.closest('td,th');if(!td)return false;const t=td.closest('table');
-   const h=t?.querySelectorAll('thead th')[td.cellIndex]?.textContent.trim().toLowerCase();return h==='key'||h==='secret'||h==='api key';};
+    const first=t?.tHead?.rows[t.tHead.rows.length-1] || t?.rows[0];
+    const h=first?.cells[td.cellIndex];return h?.tagName==='TH' && privateHeading(h.textContent);};
  const text=e=>{if(!e)return '';if(secretCell(e))return '[KEY REDACTED]';const c=e.cloneNode(true);
-   for(const n of c.querySelectorAll('script,style,input[type=password],input[type=hidden],[data-sensitive]'))n.remove();
    const originalRows=e.matches('tr')?[e]:Array.from(e.querySelectorAll('tr'));
    const clonedRows=c.matches('tr')?[c]:Array.from(c.querySelectorAll('tr'));
    originalRows.forEach((r,i)=>Array.from(r.cells||[]).forEach((td,j)=>{if(secretCell(td)&&clonedRows[i]?.cells[j])clonedRows[i].cells[j].textContent='[KEY REDACTED]';}));
+    for(const n of c.querySelectorAll('script,style,input[type=password],input[type=hidden],[data-sensitive],[hidden],[aria-hidden="true"]'))n.remove();
    const walker=document.createTreeWalker(c,NodeFilter.SHOW_TEXT);const parts=[];let current;
    while(current=walker.nextNode()){const value=current.textContent.trim();if(value)parts.push(value)}
    return scrub(parts.join(' | ')).replace(/\s+/g,' ').trim();};
  const modal=Array.from(document.querySelectorAll('dialog[open],[role=dialog][aria-modal=true]')).find(visible);
  const controls=Array.from(document.querySelectorAll('button,a[href],input:not([type=hidden]):not([type=password]),select,[role=button],[role=option],[role=menuitem],[tabindex="0"]'));
  const nodes=[];window.__quotaOperatorNodes=[];
- for(const el of controls){if(!visible(el)||secretCell(el)||(modal&&!modal.contains(el)))continue;
+  for(const el of controls){if(!visible(el)||secretCell(el)||el.closest('[data-sensitive],[hidden],[aria-hidden="true"]')||(modal&&!modal.contains(el)))continue;
    const tag=el.tagName.toLowerCase();const type=(el.getAttribute('type')||'').toLowerCase();
    if(tag==='input'&&!['','text','search','date','datetime-local','number','checkbox'].includes(type))continue;
    const holder=el.closest('dialog,[role=dialog]')||el.closest('tr,[data-key-row],article,section,li,.key-row')||el.parentElement;
@@ -370,10 +372,82 @@ _OBSERVE_JS = r"""() => {
      text:label,context,input_type:type,disabled:!!el.disabled||el.getAttribute('aria-disabled')==='true',
      value:tag==='input'||tag==='select'?scrub(el.value):null,
      options:tag==='select'?Array.from(el.options).map(o=>({value:scrub(o.value),text:scrub(o.text)})):null});}
- const main=document.querySelector('main,[role=main]')||document.body;
- return {nodes,page_text:text(modal||main),readiness:{document_state:document.readyState,main_present:!!main,
-  busy:!!document.querySelector('[aria-busy=true],[role=progressbar]'),content_ready:!!main&&main.children.length>0}};
+  const main=document.querySelector('main,[role=main]')||document.body;
+  const snapshot={nodes,page_text:text(modal||main),readiness:{document_state:document.readyState,main_present:!!main,
+   busy:!!document.querySelector('[aria-busy=true],[role=progressbar]'),content_ready:!!main&&main.children.length>0}};
+  if (!includeTables) return snapshot;
+
+  // Only present visible text outside nested tables. Cells are described once in
+  // document order. No task, desired ID or backend inventory enters this observer.
+  const hidden = 'script,style,[hidden],[aria-hidden="true"],[data-sensitive],input[type=password],input[type=hidden]';
+  const publicText = (root, table = null) => {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const words = [];
+    let part;
+    while ((part = walker.nextNode())) {
+      const parent = part.parentElement;
+      if (parent.closest('table') !== table || parent.closest(hidden) || !visible(parent)) continue;
+      const value = part.textContent.trim();
+      if (value) words.push(value);
+    }
+    return scrub(words.join(' | ')).replace(/\s+/g, ' ').trim();
+  };
+  const publicId = (cell, table) => {
+    const shown = publicText(cell, table);
+    const labels = [cell, ...cell.querySelectorAll('[title],[aria-label]')]
+      .filter(el => visible(el) && !el.closest(hidden) && el.closest('table') === table)
+      .flatMap(el => [el.getAttribute('title'), el.getAttribute('aria-label')]);
+    const ids = labels.join(' ').match(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/gi) || [];
+    return [shown, ...[...new Set(ids)].filter(id => !shown.includes(id))].filter(Boolean).join(' ');
+  };
+  const elements = window.__quotaOperatorNodes;
+  const rowControls = new Map();
+  elements.forEach((el, index) => {
+    const row = el.closest('tr');
+    if (row) {
+      if (!rowControls.has(row)) rowControls.set(row, []);
+      rowControls.get(row).push(index);
+    }
+  });
+  const tables = [];
+  for (const table of (modal || document).querySelectorAll('table')) {
+    if (!visible(table) || table.closest(hidden)) continue;
+    const rows = Array.from(table.rows).filter(row => visible(row) && !row.closest(hidden));
+    const headerRows = rows.filter(row => row.parentElement === table.tHead);
+    if (!headerRows.length && rows[0] && Array.from(rows[0].cells).every(cell => cell.tagName === 'TH')) {
+      headerRows.push(rows[0]);
+    }
+    const headers = headerRows.map(row => Array.from(row.cells, cell => publicText(cell, table)));
+    const columns = headers[headers.length - 1] || [];
+    const publicRows = rows.filter(row => !headerRows.includes(row)).map(row => {
+      const cells = Array.from(row.cells, (cell, col) => {
+        const heading = (columns[col] || '').trim().toLowerCase();
+        if (privateHeading(heading) || cell.closest('[data-sensitive]')) {
+          return '[KEY REDACTED]';
+        }
+        return heading === 'tracking id' ? publicId(cell, table) : publicText(cell, table);
+      });
+      return {cells, control_indices: rowControls.get(row) || []};
+    });
+    tables.push({headers, rows:publicRows});
+  }
+  const outsideContexts = elements.map(el => {
+    if (el.closest('table')) return '';
+    const holder = el.closest('dialog,[role=dialog],[data-key-row],article,section,li,.key-row') || el.parentElement;
+    return publicText(holder);
+  });
+  snapshot.table_layout = {page_text:publicText(modal || main), tables, outside_contexts:outsideContexts};
+  return snapshot;
 }"""
+
+
+def _row_evidence(layout, index):
+    """Evidence displayed for this control before a model action."""
+    for table in layout['tables']:
+        for row in table['rows']:
+            if index in row['control_indices']:
+                return table['headers'], row['cells']
+    return None
 
 
 class WebOperator:
@@ -407,7 +481,7 @@ class WebOperator:
         self.dialog = dialog
         self.dialog_ref = f'dialog-{self.epoch}-{self.sequence}'
 
-    def _observe(self):
+    def _observe(self, *, include_tables=None):
         self.sequence += 1
         ref = f'obs-{self.epoch}-{self.sequence}'
         if self.dialog is not None:
@@ -418,7 +492,9 @@ class WebOperator:
                     'dialog':{'ref':self.dialog_ref,'type':self.dialog.type,'message':message},
                     'action_state':self.last_action,'readiness':{'status':'native_dialog'},'observed_at':time.time()}
         self._clear_nodes()
-        snapshot = self.page.evaluate(_OBSERVE_JS)
+        if include_tables is None:
+            include_tables = getattr(self.runtime, 'read_observation', 'flat') == 'table'
+        snapshot = self.page.evaluate(_OBSERVE_JS, include_tables)
         # Retain exact public elements, never resolve a later selector by label.
         handles = self.page.evaluate_handle('() => window.__quotaOperatorNodes')
         properties = handles.get_properties()
@@ -468,11 +544,16 @@ class WebOperator:
         # does not select another element or infer target identity for the AI.
         if not element.evaluate('(el)=>el.isConnected'):
             raise WebOperatorError('AI_OPERATOR_STALE_REFERENCE')
-        fresh = self.page.evaluate(_OBSERVE_JS)
+        layout = observation.get('table_layout')
+        fresh = self.page.evaluate(_OBSERVE_JS, layout is not None)
         index = element.evaluate('(el)=>window.__quotaOperatorNodes.indexOf(el)')
         if (index < 0 or index >= len(fresh['nodes'])
                 or fresh['nodes'][index] != {k:v for k,v in node.items() if k != 'ref'}):
             raise WebOperatorError('AI_OPERATOR_STALE_REFERENCE')
+        if layout is not None:
+            old_index = next(i for i, old in enumerate(observation['nodes']) if old['ref'] == args['ref'])
+            if _row_evidence(layout, old_index) != _row_evidence(fresh['table_layout'], index):
+                raise WebOperatorError('AI_OPERATOR_STALE_REFERENCE')
         timeout = min(1500,int(_remaining(deadline)*1000))
         if args['action'] == 'click':
             # Queue one click, so native confirm() can be observed and accepted
@@ -494,14 +575,14 @@ class WebOperator:
         else:raise WebOperatorError('AI_OPERATOR_UNSUPPORTED')
         return {'status':'completed'}, {k:node.get(k) for k in ('text','tag','role','context')}
 
-    def _wait_ready(self, gate, deadline):
+    def _wait_ready(self, gate, deadline, *, include_tables=False):
         """Wait only for public page readiness, never for a chosen target row."""
         ready_deadline = min(deadline, time.monotonic() + 30)
         while True:
             _remaining(ready_deadline)
             if gate.violation:
                 raise WebOperatorError(gate.violation,may_have_submitted=gate.sent)
-            observation = self._observe()
+            observation = self._observe(include_tables=include_tables)
             if public_ready(observation) or gate.response is not None or gate.response_error:
                 return observation
             self.stage('正在等待页面加载完成', phase='operator_readiness')
@@ -511,6 +592,7 @@ class WebOperator:
         self.page.on('dialog',self._dialog_callback)
         self.page.on('framenavigated',self._navigation_callback)
         self.history = []
+        include_tables = task['kind'] == 'READ' and getattr(self.runtime, 'read_observation', 'flat') == 'table'
         try:
             with gate:
                 self.stage('正在准备费用页面' if task['kind']=='READ' else '正在准备 Key 管理页面')
@@ -534,7 +616,7 @@ class WebOperator:
                             self.page.wait_for_timeout(50)
                             if gate.violation:raise WebOperatorError(gate.violation,may_have_submitted=True)
                         return {'submitted':True}
-                    observation = self._wait_ready(gate,deadline)
+                    observation = self._wait_ready(gate,deadline,include_tables=include_tables)
                     if gate.response is not None:return gate.response
                     if gate.response_error:
                         raise CostReadError('本次 AI 操作取得的费用响应不可用，请重新核验登录和网络。',
