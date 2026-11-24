@@ -23,6 +23,43 @@ EXPECTED_CASES = {
 }
 
 
+def check_operator_result(folder, version, executable_digest):
+    report = json.loads((folder / 'summary.json').read_text(encoding='utf-8'))
+    expected_posts = {'read-only-fee-review': 0, 'positive-quota-crossing': 1, 'response-drop-restart': 1}
+    cases = report.get('cases', [])
+    if (not isinstance(cases, list) or any(not isinstance(case, dict) for case in cases)
+            or report.get('passed') is not True or report.get('version') != version
+            or report.get('exe_sha256') != executable_digest or not executable_digest
+            or type(report.get('real_requests')) is not int or report['real_requests'] != 0
+            or report.get('real_platform') != 'not_performed'
+            or len(cases) != len(expected_posts) or {case.get('name') for case in cases} != set(expected_posts)):
+        raise ValueError('PORTABLE_OPERATOR_EVIDENCE_INCOMPLETE')
+    counts = {}
+    for case in cases:
+        name = case['name']
+        posts, reads = case.get('actual_post_count'), case.get('actual_cost_queries')
+        if (case.get('passed') is not True or case.get('cleanup_passed') is not True
+                or type(posts) is not int or posts != expected_posts[name]
+                or type(reads) is not int or (reads < 2 if posts else reads != 1)
+                or (posts and case.get('permit_consumptions') != 1)):
+            raise ValueError('PORTABLE_OPERATOR_COUNTS_INVALID')
+        counts[name] = {'fee_queries': reads, 'revocation_requests': posts}
+        if name == 'response-drop-restart':
+            recovery = case.get('recovery', {})
+            original = recovery.get('before_operation_id')
+            if (not isinstance(original, str) or not original or original != recovery.get('reopened_operation_id')
+                    or original != recovery.get('verified_operation_id')
+                    or recovery.get('kind') != 'desktop_window_reopen'
+                    or recovery.get('first_window_closed') is not True
+                    or type(recovery.get('fresh_list_receipts')) is not int or recovery['fresh_list_receipts'] < 1
+                    or not recovery.get('target_id') or not recovery.get('control_id')
+                    or recovery['control_id'] == recovery['target_id']
+                    or any(type(recovery.get(key)) is not int or recovery[key] != 1 for key in
+                           ('post_count_before_close', 'post_count_after_reopen', 'post_count_after_verification'))):
+                raise ValueError('PORTABLE_OPERATOR_RECOVERY_UNVERIFIED')
+    return {'passed': True, 'cases': counts, 'exe_sha256': executable_digest}
+
+
 def check_result(mode, folder, version):
     if mode == 'smoke':
         if not (folder / 'OFFLINE-FIXTURE.txt').is_file():
@@ -64,21 +101,25 @@ def verify(bundle, evidence):
               'build_commit': identity['build_commit'], 'build_id': identity['build_id'],
               'executable_sha256': executable_digest, 'modes': {}}
     try:
-        for mode in ('smoke', 'browser-smoke', 'ai-smoke', 'offline-acceptance'):
-            folder = evidence / ('offline-acceptance-' + mode)
+        for mode in ('smoke', 'browser-smoke', 'ai-smoke', 'offline-acceptance', 'portable-operator-acceptance'):
+            operator = mode == 'portable-operator-acceptance'
+            folder = evidence / ('operator-acceptance-packaged' if operator else 'offline-acceptance-' + mode)
+            report['current_mode'] = mode
             start = time.monotonic()
             completed = subprocess.run([str(executable), '--' + mode, '--data-dir', str(folder)],
-                cwd=evidence, timeout=180, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                cwd=evidence, timeout=2400 if operator else 180, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
                 check=False)
             if completed.returncode != 0:
                 raise RuntimeError('PORTABLE_MODE_FAILED')
-            result = check_result(mode, folder, identity['application_version'])
+            result = (check_operator_result(folder, identity['application_version'], executable_digest)
+                      if operator else check_result(mode, folder, identity['application_version']))
             report['modes'][mode] = {'seconds': round(time.monotonic() - start, 3), 'evidence': result}
         validate_bundle(bundle)
         if sha256(executable.read_bytes()).hexdigest() != executable_digest:
             raise ValueError('PORTABLE_EXECUTABLE_CHANGED')
         report['passed'] = True
+        del report['current_mode']
     except Exception as exc:
         report['reason_code'] = 'PORTABLE_ACCEPTANCE_FAILED'
         report['error_type'] = type(exc).__name__

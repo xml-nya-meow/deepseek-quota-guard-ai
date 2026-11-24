@@ -51,7 +51,8 @@ load();</script></body></html>'''
 def envelope(data):return {'code':0,'msg':'','data':{'biz_code':0,'biz_msg':'','biz_data':data}}
 
 class OfflinePlatform:
-    def __init__(self,seed=4100,variant='direct',*,cost='1.25',age_days=0,fault='none',similar_ids=False):
+    def __init__(self,seed=4100,variant='direct',*,cost='1.25',age_days=0,fault='none',similar_ids=False,
+                 names=('Synthetic target','Independent control')):
         self.seed,self.variant,self.cost,self.fault=seed,variant,cost,fault
         self.today=datetime.now(TZ).date().isoformat()
         created=int((datetime.now(TZ)-timedelta(days=age_days)).replace(hour=0,minute=0,second=0,microsecond=0).timestamp())
@@ -59,8 +60,8 @@ class OfflinePlatform:
         ids=([str(UUID(int=seed*100+i)) for i in (1,2,3)] if similar_ids else
              [str(UUID(int=rng.getrandbits(128),version=4)) for _ in range(3)])
         self.target_id,self.control_id=ids[:2]
-        self.keys=[{'name':'Synthetic target','tracking_id':self.target_id,'sensitive_id':'sk-synthetic*****aaaa','created_at':created,'last_use':None,'key_type':'NORMAL'},
-                   {'name':'Independent control','tracking_id':self.control_id,'sensitive_id':'sk-synthetic*****bbbb','created_at':created,'last_use':None,'key_type':'NORMAL'},
+        self.keys=[{'name':names[0],'tracking_id':self.target_id,'sensitive_id':'sk-synthetic*****aaaa','created_at':created,'last_use':None,'key_type':'NORMAL'},
+                   {'name':names[1],'tracking_id':self.control_id,'sensitive_id':'sk-synthetic*****bbbb','created_at':created,'last_use':None,'key_type':'NORMAL'},
                    {'name':'DeepSeek Harness','tracking_id':ids[2],'sensitive_id':'','created_at':created,'last_use':None,'key_type':'DSH'}]
         random.Random(seed).shuffle(self.keys);self.initial=json.loads(json.dumps(self.keys))
         self.events=[];self.lock=threading.RLock();self.server=None;self.thread=None
@@ -76,13 +77,16 @@ class OfflinePlatform:
             self.event('page',path=parsed.path,source=source)
             return 200,'text/html; charset=utf-8',html.encode()
         if method=='GET' and parsed.path==LIST:
-            self.event('identity_read',source=source)
-            return 200,'application/json',json.dumps(envelope({'api_keys':self.keys,'key_quota':{'total':{'used':len(self.keys)-1,'limit':300}}})).encode()
+            with self.lock:
+                self.event('identity_read',source=source,ids=[key['tracking_id'] for key in self.keys])
+                return 200,'application/json',json.dumps(envelope({'api_keys':self.keys,'key_quota':{'total':{'used':len(self.keys)-1,'limit':300}}})).encode()
         if method=='GET' and parsed.path==COST:
             q=parse_qs(parsed.query);ids=q.get('api_key_tracking_id',[])
-            self.event('cost_read',ids=ids,source=source,start=q.get('start'),end=q.get('end'))
+            with self.lock:
+                amount=self.cost
+                self.event('cost_read',ids=ids,source=source,start=q.get('start'),end=q.get('end'),amount=amount)
             start=int(q['start'][0]);end=int(q['end'][0])
-            series=[{'api_key':{'tracking_id':k},'model':'synthetic','buckets':[{'time':start,'cost':self.cost}]} for k in ids]
+            series=[{'api_key':{'tracking_id':k},'model':'synthetic','buckets':[{'time':start,'cost':amount}]} for k in ids]
             data={'start':start,'end':end,'bucket':'1d','data':[{'currency':'CNY','series':series,'function_series':[]}]}
             return 200,'application/json',json.dumps(envelope(data)).encode()
         if method=='POST':

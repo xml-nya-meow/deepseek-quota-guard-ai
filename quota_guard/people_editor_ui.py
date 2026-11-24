@@ -6,6 +6,14 @@ from .core import GuardError, Person, clean_name, money
 from .people_editor import PeopleEditorSession
 
 
+def participation(person):
+    if not person.name:
+        return '待填写'
+    if person.amount == -1:
+        return '跳过'
+    return '零额度' if person.amount == 0 else '按额度管理'
+
+
 def open_people_editor(app, initial_amount=None):
     # Import presentation helpers lazily to avoid an App/editor import cycle.
     from .ui import amount_text, safe_error
@@ -35,18 +43,20 @@ def open_people_editor(app, initial_amount=None):
     body.grid(sticky='nsew')
     body.columnconfigure(0, weight=1)
     body.rowconfigure(1, weight=1, minsize=70)
-    hint = ttk.Label(body, text='已填写姓名：-1 跳过　｜　0 零额度　｜　正数为个人累计额度\n未填写姓名的行保留金额，不参与管理。有效输入停顿 0.6 秒后自动保存。', wraplength=700)
+    hint = ttk.Label(body, text='名称与官网 Key 名称一致。已命名行填 -1 跳过，填 0 表示零额度，正数为个人累计额度。\n空名称可预填金额，填写名称后才参与额度检查。有效输入停顿 0.6 秒后自动保存。', wraplength=700)
     hint.grid(row=0, column=0, sticky='ew', pady=(0, 10))
     table_frame = ttk.Frame(body)
     table_frame.grid(row=1, column=0, sticky='nsew')
     table_frame.columnconfigure(0, weight=1)
     table_frame.rowconfigure(0, weight=1)
-    table = ttk.Treeview(table_frame, columns=('name', 'amount'), show='headings',
+    table = ttk.Treeview(table_frame, columns=('name', 'amount', 'scope'), show='headings',
                          selectmode='browse', height=5)
     table.heading('name', text='API名/人员名')
     table.heading('amount', text='个人金额（元）')
+    table.heading('scope', text='管理范围')
     table.column('name', width=370, minwidth=80)
     table.column('amount', width=180, minwidth=80)
+    table.column('scope', width=105, minwidth=70)
     table.grid(row=0, column=0, sticky='nsew')
     scrollbar = ttk.Scrollbar(table_frame, command=table.yview)
     scrollbar.grid(row=0, column=1, sticky='ns')
@@ -56,7 +66,7 @@ def open_people_editor(app, initial_amount=None):
     form.columnconfigure(0, weight=2)
     form.columnconfigure(1, weight=1)
     name_var, amount_var = tk.StringVar(), tk.StringVar()
-    ttk.Label(form, text='名字').grid(row=0, column=0, sticky='w')
+    ttk.Label(form, text='Key 名称').grid(row=0, column=0, sticky='w')
     ttk.Label(form, text='个人金额（元）').grid(row=0, column=1, sticky='w')
     name_entry = ttk.Entry(form, textvariable=name_var, width=24)
     name_entry.grid(row=1, column=0, sticky='ew', padx=(0, 12))
@@ -64,7 +74,7 @@ def open_people_editor(app, initial_amount=None):
     amount_entry.grid(row=1, column=1, sticky='ew')
     operations = ttk.Frame(body)
     operations.grid(row=3, column=0, sticky='ew', pady=(0, 8))
-    editor_status = tk.StringVar(value='修改会自动保存；取消或关闭窗口保留已保存的内容。')
+    editor_status = tk.StringVar(value='已载入人员表。选中一行可修改名称和个人额度。')
     feedback = ttk.Label(body, textvariable=editor_status, wraplength=700)
     feedback.grid(row=4, column=0, sticky='ew', pady=(0, 8))
     footer = ttk.Frame(body)
@@ -103,7 +113,7 @@ def open_people_editor(app, initial_amount=None):
         state['loading'] = True
         table.delete(*table.get_children())
         for i, person in enumerate(state['rows']):
-            table.insert('', 'end', iid=str(i), values=(person.name, amount_text(person.amount)))
+            table.insert('', 'end', iid=str(i), values=(person.name, amount_text(person.amount), participation(person)))
         index = min(index or 0, len(state['rows']) - 1) if state['rows'] else None
         if index is not None:
             table.selection_set(str(index))
@@ -118,7 +128,9 @@ def open_people_editor(app, initial_amount=None):
         app.check_people(show_dialog=False)
         app._diagnostic('editor_saved', action=action, count=len(session.rows))
         app.status_var.set('人员表已自动保存。请重新读取费用，再启动全自动管理。')
-        editor_status.set('已自动保存。撤销可退回上一步；不保存本次修改可恢复打开窗口前的内容。')
+        managed = sum(bool(person.name) and person.amount >= 0 for person in session.rows)
+        blanks = sum(not person.name for person in session.rows)
+        editor_status.set(f'已保存到人员表。管理 {managed} 人，待填写 {blanks} 行。')
         undo_button.configure(state='normal' if session.can_undo else 'disabled')
 
     def failure(exc, notify=False):
@@ -149,7 +161,7 @@ def open_people_editor(app, initial_amount=None):
             state['rows'] = list(session.rows)
             state['dirty'] = False
             # Keep cursor and typed formatting intact during debounce saves.
-            table.item(str(index), values=(person.name, amount_text(person.amount)))
+            table.item(str(index), values=(person.name, amount_text(person.amount), participation(person)))
             if changed:
                 saved('update')
             else:
@@ -169,7 +181,7 @@ def open_people_editor(app, initial_amount=None):
             state['selection_conflict'] = True
         cancel_timer()
         undo_button.configure(state='normal')
-        editor_status.set('正在编辑，停顿后自动保存……')
+        editor_status.set('正在编辑，尚未保存。按 Enter 可立即保存；现在关闭会放弃这段输入。')
         state['timer'] = app.root.after(600, commit)
 
     def select(_event=None):
@@ -239,7 +251,7 @@ def open_people_editor(app, initial_amount=None):
         cancel_timer()
         app._action_state('edit', '已关闭')
         app.status_var.set('人员表已关闭，已保存的修改保留。' if not state['dirty'] else
-                           '人员表已关闭，已保存的修改保留；窗口关闭时未执行额外保存。')
+                           '人员表已关闭。此次关闭未执行额外保存，最后一段未保存的输入已丢弃。')
         dialog.destroy()
 
     def discard():
@@ -255,13 +267,13 @@ def open_people_editor(app, initial_amount=None):
         except Exception as exc:
             failure(exc, True)
 
-    ttk.Button(operations, text='更新选中行', command=app._button_command('editor_update', lambda: commit(True))).pack(side='left')
+    ttk.Button(operations, text='立即保存此行', command=app._button_command('editor_update', lambda: commit(True))).pack(side='left')
     ttk.Button(operations, text='添加新行', command=app._button_command('editor_add', add)).pack(side='left', padx=8)
     ttk.Button(operations, text='移除选中行', command=app._button_command('editor_remove', remove)).pack(side='left')
-    ttk.Button(footer, text='不保存本次修改', command=app._button_command('editor_discard', discard)).grid(row=0, column=0, sticky='w')
+    ttk.Button(footer, text='还原到打开时', command=app._button_command('editor_discard', discard)).grid(row=0, column=0, sticky='w')
     undo_button = ttk.Button(footer, text='撤销', command=app._button_command('editor_undo', undo))
     undo_button.grid(row=0, column=1)
-    ttk.Button(footer, text='取消', command=app._button_command('editor_cancel', close)).grid(row=0, column=2, sticky='e')
+    ttk.Button(footer, text='关闭', command=app._button_command('editor_cancel', close)).grid(row=0, column=2, sticky='e')
     table.bind('<<TreeviewSelect>>', select)
     name_var.trace_add('write', changed)
     amount_var.trace_add('write', changed)
@@ -284,4 +296,4 @@ def open_people_editor(app, initial_amount=None):
             feedback.configure(wraplength=max(250, event.width - 32))
     body.bind('<Configure>', rewrap)
     app._action_state('edit', '编辑中')
-    app.status_var.set('人员表已打开。有效输入自动保存，撤销退回上一步，取消仅关闭窗口。')
+    app.status_var.set('人员表已打开。关闭会保留已保存的修改；“还原到打开时”会恢复本次编辑前的整张人员表。')

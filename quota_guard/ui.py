@@ -23,12 +23,12 @@ from uuid import uuid4
 from . import __version__
 from .core import (AccountMismatch, DataStore, GuardError, Person, SnapshotApplyError,
                    clean_name, eligible_for_automatic_action, money, validate_key_periods)
-from .fee_review import FeeReviewData, FeeReviewFrame, amount_text
+from .fee_review import FeeReviewData, amount_text
 from .declared_recovery import DeclaredRecoveryClosed
 from .build_identity import diagnostic_build_identity
 from .revocation_permit import KeyInspectionError, RevocationNotSubmitted
 from .target_lock import TargetLockError
-from .workspace import new_ledger_path, save_current_ledger
+from .workspace import has_saved_data, new_ledger_path, save_current_ledger
 from .preferences import (DEFAULT_POLL_INTERVAL_SECONDS, load_poll_interval,
                           save_poll_interval, validate_poll_interval, TableDefaults,
                           load_table_defaults, save_table_defaults)
@@ -97,19 +97,6 @@ COLLECTION_REJECTION_LABELS = {
     'LOCAL_CONTEXT_UNAVAILABLE': ('本地文件待恢复', '本地账本或人员表无法完成核验；已暂停管理，请恢复文件后重新读取。'),
     'SNAPSHOT_DATA_INVALID': ('费用数据待核查', '费用标识或金额未通过账本校验；本次费用快照未更新，请核对来源。'),
 }
-STATUS_LABELS = {
-    "unassigned": "待填写姓名 · 不参与管理",
-    "skipped": "跳过管理", "unknown": "等待有效费用", "ok": "尚未达到额度",
-    "triggered": "达到额度 · 待处理", "prepared": "待你在平台确认",
-    "pending": "待处理", "absent_verified": "平台列表已不存在 · 原因需核实",
-    "failed": "处理失败", "unknown_result": "处理结果未知 · 待核实",
-    "retired": "已从平台列表移除 · 保留账目",
-    "recovery_pending": "上次操作待核实",
-    "present_unresolved": "观察时仍存在 · 旧操作待核实",
-    "not_submitted": "达到额度 · 准备失败，未提交",
-}
-
-
 def collection_is_fresh(observed_wall, observed_monotonic, end_date,
                         *, wall_now=None, monotonic_now=None) -> bool:
     """Reject old, cross-day or clock-discontinuous evidence before approval."""
@@ -130,17 +117,6 @@ def safe_error(exc: Exception | str) -> str:
     text = re.sub(r"sk-[A-Za-z0-9_*.-]+", "[密钥已隐藏]", text)
     text = re.sub(r"(?i)(authorization|cookie|access_token|refresh_token)\s*[:=]\s*[^\s,;]+", r"\1=[已隐藏]", text)
     return text[:1200]
-
-
-def has_saved_data(folder: Path) -> bool:
-    """A leftover ledger/log is history, not permission to initialize again."""
-    if not folder.exists():
-        return False
-    names = {"管理设置.json", "人员额度.xlsx", "状态.db", "状态.db-wal", "状态.db-shm"}
-    for item in folder.iterdir():
-        if item.name in names or item.name.startswith(("运行日志-", "运行摘要-", ".initial", ".初始化", "初始化")):
-            return True
-    return False
 
 
 def initialize_first_management_scope(gate, store, *, declared_first_use, just_created):
@@ -193,8 +169,14 @@ def prepare_initial_draft(rows) -> tuple[list[Person], int]:
 
 
 class App:
-    def __init__(self, root: tk.Tk, folder: Path, home_folder: Path | None = None, *, responsibility_directory=None):
+    is_demo = False
+
+    def __init__(self, root: tk.Tk, folder: Path, home_folder: Path | None = None, *,
+                 responsibility_directory=None, on_demo=None):
         self.root = root
+        self.on_demo = on_demo
+        self.open_ledger_failed = False
+        self.needs_scope_recovery = False
         self.folder = Path(folder).resolve()
         self.home_folder = Path(home_folder or folder).resolve()
         from .responsibility_gate import ResponsibilityGate
@@ -225,6 +207,7 @@ class App:
         self.collection_observed_monotonic = None
         self.collection_end_date = None
         self.review_periods = {}
+        self.review_unsubmitted = set()
         self.action_states = {}
         self.button_labels = {}
         self.pending_login = False
@@ -259,7 +242,8 @@ class App:
         self.diagnostics_dir = self.home_folder / "临时诊断日志"
         self.diagnostics = DiagnosticLog(self.diagnostics_dir)
         self._diagnostic("ui_opened", **diagnostic_build_identity())
-        self.root.title(f"DeepSeek 额度管理 · 4B 网页操作 {__version__} · 试用版")
+        edition = "示例账本 · 本机模拟控制台" if self.is_demo else "4B 网页操作"
+        self.root.title(f"DeepSeek 额度管理 · {edition} {__version__} · 试用版")
         fit_window(self.root)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self._build()
@@ -267,155 +251,9 @@ class App:
         self._resume_lifecycle_timers()
 
     def _build(self):
-        style = ttk.Style()
-        if "vista" in style.theme_names():
-            style.theme_use("vista")
-        style.configure("Treeview", rowheight=31, font=("Microsoft YaHei UI", 10))
-        style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 10, "bold"))
-        style.configure("Title.TLabel", font=("Microsoft YaHei UI", 19, "bold"))
-        style.configure("Muted.TLabel", foreground="#526174")
-        style.configure("Warn.TLabel", foreground="#915212")
+        from .desktop_home import DesktopHome
         self.root.option_add("*Font", ("Microsoft YaHei UI", 10))
-        self.main_content = ScrollableContent(self.root, padding=18)
-        self.main_content.pack(fill="both", expand=True)
-        outer = self.main_content.content
-        ttk.Label(outer, text="DeepSeek 额度管理 · 内置 4B 网页操作", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(outer, text="填写表格 → 登录读取 → 开启管理 · 模型与浏览器由程序自动运行", style="Muted.TLabel").pack(anchor="w", pady=(3, 12))
-        self.path_var = tk.StringVar(value=f"数据文件夹：{self.folder}")
-        self.main_content.wrap(ttk.Label(outer, textvariable=self.path_var, wraplength=1040)).pack(anchor="w")
-        self.summary_var = tk.StringVar(value="正在检查已有数据……")
-        self.main_content.wrap(ttk.Label(outer, textvariable=self.summary_var, wraplength=1040)).pack(anchor="w", pady=(8, 8))
-        bar = ttk.Frame(outer)
-        bar.pack(fill="x", pady=(0, 7))
-        self.buttons = {}
-        specs = [
-            ("folder", "数据文件夹", self.choose_folder),
-            ("setup", "新建列表", self.setup),
-            ("date", "统计方式", self.change_statistics_mode),
-            ("template", "保存 Excel 模板", self.save_template),
-            ("import_people", "导入人员 Excel", self.import_people),
-            ("import", "检查官方导出", self.import_billing),
-        ]
-        for key, text, command in specs:
-            b = ttk.Button(bar, text=text, command=self._button_command(key, command))
-            b.pack(side="left", padx=(0, 7))
-            self.buttons[key] = b
-        sheet_bar = ttk.Frame(outer)
-        sheet_bar.pack(fill="x", pady=(0, 7))
-        for key, text, command in [("edit", "填写两列表格", self.edit_people),
-                                   ("excel", "用 Excel/WPS 打开", self.open_excel),
-                                   ("check", "检查表格", self.check_people),
-                                   ("inspect", "检查删除准备（只读）", self.inspect_revoke),
-                                   ("responsibility", "管理准备 / 恢复", self.initialize_responsibility)]:
-            button = ttk.Button(sheet_bar, text=text, command=self._button_command(key, command))
-            button.pack(side="left", padx=(0, 7))
-            self.buttons[key] = button
-        bar2 = ttk.Frame(outer)
-        bar2.pack(fill="x", pady=(0, 10))
-        for key, text, command in [
-            ("login", "登录 / 重新登录", self.login),
-            ("collect", "立即读取费用", self.collect),
-            ("start", "启动全自动管理", self.start),
-            ("stop", "停止管理", self.stop),
-            ("revoke", "强制删除选中 Key", self.revoke_selected_once),
-            ("verify", "核实平台状态", self.verify_revoke),
-        ]:
-            b = ttk.Button(bar2, text=text, command=self._button_command(key, command))
-            b.pack(side="left", padx=(0, 7))
-            self.buttons[key] = b
-        operation_bar = ttk.Frame(outer)
-        operation_bar.pack(fill="x", pady=(0, 8))
-        self.buttons["interrupt"] = ttk.Button(operation_bar, text="中断当前操作",
-            command=self._button_command("interrupt", self.interrupt_operation))
-        self.buttons["interrupt"].pack(side="left", padx=(0, 8))
-        self.buttons["diagnostics"] = ttk.Button(operation_bar, text="诊断日志 / 本地 AI 建议",
-            command=self._button_command("diagnostics", self.open_diagnostics))
-        self.buttons["diagnostics"].pack(side="left", padx=(0, 12))
-        self.buttons["save_audit"] = ttk.Button(operation_bar, text="保存处理记录",
-            command=self._button_command("save_audit", self.retry_audit))
-        self.buttons["save_audit"].pack(side="left", padx=(0, 8))
-        self.buttons["account_ledger"] = ttk.Button(operation_bar, text="为当前账户建账本",
-            command=self._button_command("account_ledger", self.resolve_account_mismatch))
-        self.buttons["account_ledger"].pack(side="left")
-        poll_bar = ttk.Frame(outer)
-        poll_bar.pack(fill="x", pady=(0, 8))
-        ttk.Label(poll_bar, text="自动管理间隔").pack(side="left")
-        self.poll_interval_var = tk.StringVar(value=str(self.poll_interval_seconds))
-        self.poll_interval_entry = ttk.Entry(poll_bar, textvariable=self.poll_interval_var, width=7)
-        self.poll_interval_entry.pack(side="left", padx=(7, 4))
-        self.poll_interval_entry.bind('<Return>', lambda _event: self.apply_poll_interval())
-        ttk.Label(poll_bar, text="秒").pack(side="left", padx=(0, 7))
-        self.buttons['poll_interval'] = ttk.Button(poll_bar, text="保存间隔", command=self.apply_poll_interval)
-        self.buttons['poll_interval'].pack(side="left", padx=(0, 10))
-        self.poll_feedback_var = tk.StringVar(value=self.poll_preference_notice or '每轮处理完成后等待；可设置 1～3600 秒。')
-        ttk.Label(poll_bar, textvariable=self.poll_feedback_var, style='Muted.TLabel').pack(side="left")
-        defaults_bar = ttk.Frame(outer)
-        defaults_bar.pack(fill="x", pady=(0, 5))
-        ttk.Label(defaults_bar, text="斩杀线").pack(side="left")
-        self.kill_line_var = tk.StringVar(value=amount_text(self.table_defaults.kill_line))
-        ttk.Entry(defaults_bar, textvariable=self.kill_line_var, width=22).pack(side="left", padx=(7, 4))
-        ttk.Label(defaults_bar, text="元　新表默认填").pack(side="left")
-        self.table_fill_var = tk.StringVar(value='-1（跳过管理）' if self.table_defaults.fill_mode == 'skip' else '斩杀线')
-        ttk.Combobox(defaults_bar, textvariable=self.table_fill_var, state='readonly', width=17,
-                     values=('-1（跳过管理）', '斩杀线')).pack(side="left", padx=7)
-        self.buttons['table_defaults'] = ttk.Button(defaults_bar, text="保存新表默认", command=self.apply_table_defaults)
-        self.buttons['table_defaults'].pack(side="left")
-        self.theme_button = ttk.Button(defaults_bar, command=self.cycle_theme)
-        self.theme_button.pack(side="right")
-        self.defaults_feedback_var = tk.StringVar(value=self.table_defaults_notice or '斩杀线最小为 0，仅预填新表个人额度；已有人员额度不变。')
-        self.main_content.wrap(ttk.Label(outer, textvariable=self.defaults_feedback_var, style='Muted.TLabel', wraplength=1100)).pack(anchor='w', pady=(0, 8))
-        self.main_content.wrap(ttk.Label(outer, text="强制删除只处理选中的 Key，不要求达到额度；全自动管理会周期读取并自动永久撤销达额 Key，无需逐枚人工审批。未填写姓名的行不参与管理。“立即读取”只核对数据。账单延迟与在途请求仍可能超支；真实自动撤销尚待验证。", style="Warn.TLabel", wraplength=1040)).pack(anchor="w", pady=(0, 10))
-        self.collection_summary_var = tk.StringVar(value="费用核验：尚未读取。")
-        self.main_content.wrap(ttk.Label(outer, textvariable=self.collection_summary_var,
-                                        wraplength=1040)).pack(anchor="w", pady=(0, 8))
-        self.queue_summary_var = tk.StringVar(value='候选队列尚未运行。')
-        self.main_content.wrap(ttk.Label(outer, textvariable=self.queue_summary_var,
-                                        wraplength=1040)).pack(anchor='w', pady=(0, 4))
-        self.forecast_summary_var = tk.StringVar(value='预测记录尚未读取费用。')
-        self.main_content.wrap(ttk.Label(outer, textvariable=self.forecast_summary_var,
-                                        style='Muted.TLabel', wraplength=1040)).pack(anchor='w', pady=(0, 8))
-        tabs = ttk.Notebook(outer)
-        tabs.pack(fill="both", expand=True)
-        overview = ttk.Frame(tabs, padding=8)
-        reports = ttk.Frame(tabs, padding=8)
-        tabs.add(overview, text="人员与额度")
-        self.review_tabs = tabs
-        self.fee_review = FeeReviewFrame(tabs, on_start=lambda: self.buttons["start"].invoke())
-        tabs.add(self.fee_review, text="费用核对")
-        tabs.add(reports, text="处理汇报")
-        tabs.bind("<<NotebookTabChanged>>", self._review_tab_changed)
-        columns = ("name", "amount", "share", "spent", "status")
-        self.tree = ttk.Treeview(overview, columns=columns, show="headings", selectmode="browse", height=7)
-        for col, title, width in zip(columns, ["API名 / 人员名", "个人额度（元）", "公共额度（元）", "累计费用（元）", "当前状态"], [190, 150, 150, 150, 270]):
-            self.tree.heading(col, text=title)
-            self.tree.column(col, width=width, minwidth=90, anchor="w")
-        scroll = ttk.Scrollbar(overview, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
-        scroll.pack(side="right", fill="y")
-        self.tree.pack(fill="both", expand=True)
-        self.tree.tag_configure("triggered", foreground="#a52323")
-        self.tree.tag_configure("unknown", foreground="#94600a")
-        self.tree.tag_configure("skipped", foreground="#758192")
-        self.tree.bind("<<TreeviewSelect>>", self._selection)
-        self.detail_var = tk.StringVar(value="-1：跳过管理　　0：零额度，进入停用流程　　正数：达到个人或公共额度即触发")
-        ttk.Label(overview, textvariable=self.detail_var, wraplength=1000).pack(anchor="w", pady=(8, 0))
-        report_bar = ttk.Frame(reports)
-        report_bar.pack(fill="x", pady=(0, 6))
-        self.buttons["reports"] = ttk.Button(report_bar, text="刷新汇报", command=self._button_command("reports", lambda: self.refresh_events(show_status=True)))
-        self.buttons["reports"].pack(side="left")
-        self.buttons["logs"] = ttk.Button(report_bar, text="打开日志文件夹", command=self._button_command("logs", self.open_folder))
-        self.buttons["logs"].pack(side="left", padx=8)
-        self.report_text = tk.Text(reports, wrap="word", state="disabled", relief="flat", bg="#f6f8fa", padx=12, pady=10, height=8)
-        report_scroll = ttk.Scrollbar(reports, command=self.report_text.yview)
-        self.report_text.configure(yscrollcommand=report_scroll.set)
-        report_scroll.pack(side="right", fill="y")
-        self.report_text.pack(fill="both", expand=True)
-        self.status_var = tk.StringVar(value="尚未启动观察")
-        self.main_content.wrap(ttk.Label(outer, textvariable=self.status_var, wraplength=1040)).pack(anchor="w", pady=(10, 0))
-        self.progress_var = tk.StringVar(value="当前操作：空闲")
-        self.main_content.wrap(ttk.Label(outer, textvariable=self.progress_var, style="Muted.TLabel", wraplength=1040)).pack(anchor="w", pady=(4, 0))
-        self.audit_var = tk.StringVar(value="")
-        self.main_content.wrap(ttk.Label(outer, textvariable=self.audit_var, style="Warn.TLabel", wraplength=1040)).pack(anchor="w")
+        self.desktop = DesktopHome(self)
         self._update_buttons()
 
     def _update_buttons(self):
@@ -468,8 +306,9 @@ class App:
             if self.recovery_mode and key == "import_people":
                 label = "恢复人员 Excel"
             button.configure(text=label, state="normal" if enabled else "disabled")
-        start = self.buttons["start"]
-        self.fee_review.start_button.configure(text=start.cget("text"), state=start.cget("state"))
+        if self.fee_review.data and self.fee_review.data.management_running != self.observing:
+            self._refresh_fee_review()
+        self.desktop.update()
 
     def _refresh_theme(self):
         theme = resolve_theme(self.theme_mode)
@@ -764,7 +603,7 @@ class App:
             self._refresh_fee_review()
 
     def _review_tab_changed(self, _event):
-        if not self.closing and self.review_tabs.select() == str(self.fee_review):
+        if not self.closing and self.review_tabs.select() in {str(self.fee_review), str(self.overview_tab)}:
             self._refresh_fee_review()
 
     def _refresh_fee_review(self, *, select=False):
@@ -790,17 +629,25 @@ class App:
             observed = "本轮尚无有效采样，已有金额按历史记录显示。"
         rows = []
         for row in self.rows:
+            if row.get("tracking_id") in self.review_unsubmitted:
+                row = dict(row, last_not_submitted=True)
             key_period = self.review_periods.get(row.get("tracking_id"))
             if key_period:
                 row = dict(row, start_date=key_period["start_date"], end_date=key_period["end_date"])
             rows.append(row)
-        self.fee_review.show(FeeReviewData(tuple(rows), self.config.total_budget, self.config.people_count,
+        review = FeeReviewData(tuple(rows), self.config.total_budget, self.config.people_count,
             self.config.share, period, identity, observed, current, current and self.collection_has_fees,
-            self.collection_summary_var.get()))
+            self.collection_summary_var.get(), management_running=self.observing)
+        self.fee_review.show(review)
+        for iid in self.tree.get_children():
+            row = rows[int(iid)]
+            self.tree.set(iid, "spent", review.expense(row))
+            self.tree.set(iid, "status", review.state(row))
+            self.tree.item(iid, tags=(review.tag(row),))
+        self._selection()
         if select:
             self.review_tabs.select(self.fee_review)
-            outer = self.main_content
-            outer.canvas.yview_moveto(self.review_tabs.winfo_y() / max(1, outer.content.winfo_height()))
+            self.main_content.canvas.yview_moveto(0)
 
     def _saved_fee_fact(self):
         """A historical UI fact only; never grants or refreshes permission."""
@@ -917,10 +764,18 @@ class App:
             self._invalidate_collection()
             self.error('数据需要核查', exc, dialog=False)
         finally:
-            if (self.fee_review.data and self.fee_review.data.identity_current
-                    and not collection_is_fresh(self.collection_observed_wall, self.collection_observed_monotonic,
-                                                self.collection_end_date)):
-                self._refresh_fee_review()
+            review = self.fee_review.data
+            if review and review.identity_current:
+                fresh = collection_is_fresh(self.collection_observed_wall, self.collection_observed_monotonic,
+                                            self.collection_end_date)
+                if fresh and review.fees_current:
+                    try:
+                        fresh = self.collection_source_id == self.store.current_snapshot_id()
+                    except GuardError:
+                        fresh = False
+                if not fresh:
+                    self._refresh_fee_review()
+                    self.desktop.update()
             self._arm_lifecycle_timer('workbook_timer', 1000, self._watch_workbook)
 
     def error(self, title: str, exc: Exception | str, *, dialog=True, next_step=""):
@@ -929,6 +784,12 @@ class App:
             messagebox.showerror(title, safe_error(exc), parent=self.root)
 
     def load_folder(self):
+        self.activity_report.clear()
+        self.open_ledger_failed = False
+        self.needs_scope_recovery = False
+        self.rows = []
+        self.tree.delete(*self.tree.get_children())
+        self.detail_var.set("选中一行可查看完整 Tracking ID 和处理依据。")
         self.config = None
         self.recovery_mode = False
         self.validated_hash = None
@@ -965,9 +826,11 @@ class App:
                     self.status_var.set(f'已恢复并结清 {recovered} 项未取得发送许可的中断操作。'
                                         '自动管理保持停止；请重新读取费用后正常启动。')
             except GuardError as exc:
+                self.needs_scope_recovery = True
                 self.status_var.set('账本已载入；共享责任需核查，读取与核实仍可用。' + safe_error(exc))
         except Exception as exc:
             self.config = None
+            self.open_ledger_failed = True
             self.summary_var.set("已有数据需要核查；未覆盖文件，未清零统计。")
             self.error("无法恢复数据", exc)
         self._update_buttons()
@@ -998,6 +861,8 @@ class App:
                 self.error('管理准备 / 恢复未完成', exc,
                     next_step='原登记和账本已保留；请恢复缺失文件或核实原操作，不要重新创建或清空登记。')
                 return
+            self.needs_scope_recovery = False
+            self.desktop.update()
             self.status_var.set(f'原管理记录已核验，恢复 {recovered} 项本地中断记录；'
                                 '没有执行平台删除。全自动管理保持停止，请先重新读取费用后正常启动。')
             return
@@ -1009,7 +874,7 @@ class App:
             path = filedialog.askdirectory(title='选择另一个已有账本的数据目录', parent=self.root)
             if not path:
                 return
-            candidate = DataStore(Path(path))
+            candidate = DataStore(self._ledger_folder(Path(path)))
             candidate.load(require_workbook=False)
             if all(s.folder != candidate.folder for s in stores):
                 stores.append(candidate)
@@ -1022,6 +887,8 @@ class App:
                 '确认这是明确建立的新范围，且声明完整？', parent=self.root):
             return
         self.responsibility_gate.initialize(stores)
+        self.needs_scope_recovery = False
+        self.desktop.update()
         self.status_var.set('本机责任范围已建立。原未决须先核实；全自动管理仍需正常启动。')
 
     def choose_folder(self):
@@ -1033,12 +900,15 @@ class App:
             return
         self._queue_change(lambda: self._switch_folder(Path(path)), "正在切换账本……")
 
+    def _ledger_folder(self, folder: Path) -> Path:
+        return Path(folder).resolve()
+
     def _switch_folder(self, folder: Path, *, reset_session=True):
         """Select and persist only after validation and acquisition of the new lock."""
         if self.audit_failed:
             self._audit_notice()
             return
-        folder = Path(folder).resolve()
+        folder = self._ledger_folder(folder)
         if folder == self.folder:
             return
         from .instance import FolderLock
@@ -1095,6 +965,9 @@ class App:
                     self.refresh_events()
                 def done(_result):
                     self._action_state("login", "待登录")
+                    if self.is_demo:
+                        self.status_var.set("已连接本机模拟控制台。点击“读取示例费用”后可查看额度核对。")
+                        return
                     self.status_var.set("浏览器已打开。请登录原账户，再选中待核实记录并点击“核实平台状态”。恢复期间不能启动新撤销。" if self.recovery_mode else
                                         "浏览器已打开，待登录。请在新页面完成登录，再点击“立即读取费用”核验账户和费用；自动管理已停止。")
                 self._browser_action("login", done)
@@ -1320,38 +1193,48 @@ class App:
     def import_people(self):
         if not self.config or self.busy or self.observing or self.closing:
             return
+        store, config, recovering = self.store, self.config, self.recovery_mode
         path = filedialog.askopenfilename(title="导入两列人员额度表", filetypes=[("Excel 表格", "*.xlsx")], parent=self.root)
         if not path:
             return
         try:
             from .excel_io import read_people_workbook
-            recovering = self.recovery_mode
-            expected = self.store.recovery_workbook_hash() if recovering else self.store.workbook_hash()
-            people = read_people_workbook(path)
+            expected = store.recovery_workbook_hash() if recovering else store.workbook_hash()
+            people = read_people_workbook(path, allow_unassigned=not recovering)
             # Validate names/count and amounts before presenting a save approval.
-            people = self.store._validate_people(people, self.config.people_count)
-            managed = sum(p.amount >= 0 for p in people)
-            zeros = sum(p.amount == 0 for p in people)
-            skipped = sum(p.amount == -1 for p in people)
+            people = store._validate_people(people, config.people_count, allow_unassigned=not recovering)
+            managed = sum(bool(p.name) and p.amount >= 0 for p in people)
+            zeros = sum(bool(p.name) and p.amount == 0 for p in people)
+            skipped = sum(bool(p.name) and p.amount == -1 for p in people)
+            unassigned = sum(not p.name for p in people)
+            counts = f"共 {len(people)} 行，管理 {managed} 人（其中零额度 {zeros} 人），跳过 {skipped} 个已命名 Key，待填写 {unassigned} 行。"
             note = ("将恢复当前账本的人员表；存在的损坏表格会先另存备份。账本、费用和原操作记录保留，自动管理不会开启。"
                     if recovering else "导入后替换当前账本的人员表；原始导入文件保留。零额度人员将在启动管理后进入停用流程。")
             if not messagebox.askyesno("确认恢复人员表" if recovering else "确认导入人员额度",
-                    f"共 {len(people)} 行：管理 {managed} 人，零额度 {zeros} 人，跳过 {skipped} 行。\n\n" + note + "\n确认导入？", parent=self.root):
+                    counts + "\n\n" + note + "\n确认导入？", parent=self.root):
                 return
-            if Path(path).resolve() == self.store.workbook_path:
+            if (self.store is not store or self.config != config or self.recovery_mode != recovering
+                    or self.closing or self.busy or self.observing or self.pending_change is not None
+                    or self.pending_login or self.interrupting or self.single_revoke_id is not None
+                    or self.audit_failed or self.cleanup_failed):
+                self.status_var.set('导入期间账本或运行状态已变化，请在当前账本重新导入。')
+                return
+            if Path(path).resolve() == store.workbook_path:
                 # Importing the canonical file itself requires no rewrite.
-                if self.store.workbook_hash() != expected:
+                if store.workbook_hash() != expected:
                     raise ValueError("表格已改变，请重新导入。")
             elif recovering:
-                self.store.restore_people(people, expected_hash=expected)
+                store.restore_people(people, expected_hash=expected)
             else:
-                self.store.save_people(people, expected_hash=expected)
+                store.save_people(people, expected_hash=expected, allow_unassigned=True)
             self.validated_hash = None
             self._invalidate_collection()
-            self.check_people(show_dialog=False)
+            if not self.check_people(show_dialog=False, allow_empty=True):
+                self._action_state("import_people", "待核对")
+                return
             self.refresh_events()
             self._action_state("import_people", "已完成")
-            self.status_var.set(f"已导入：管理 {managed} 人，零额度 {zeros} 人，跳过 {skipped} 行。自动管理未启动。")
+            self.status_var.set("已导入。" + counts + "自动管理未启动。")
         except Exception as exc:
             self.validated_hash = None
             self._invalidate_collection()
@@ -1438,6 +1321,9 @@ class App:
     def refresh_rows(self, *, readonly=False):
         if not self.store or not self.config:
             return
+        selected = self.selected()
+        previous_id = selected.get('tracking_id') if selected else None
+        viewport = self.tree.yview()
         # Validate the ledger separately: database/settings damage is not a
         # workbook recovery mode and must never be hidden by an empty table.
         self.config = self.store.load(require_workbook=False)
@@ -1450,8 +1336,10 @@ class App:
         self.rows = ([] if self.recovery_mode else
                      self.store.read_evaluation() if readonly else self.store.evaluate())
         # Recovery must not depend on a person still appearing in the workbook.
-        for action in self.store.unresolved_actions():
-            existing = next((r for r in self.rows if r.get('tracking_id') == action['tracking_id']), None)
+        unresolved, self.review_unsubmitted = self.store.roster_action_evidence()
+        by_id = {row['tracking_id']: row for row in self.rows if row.get('tracking_id')}
+        for action in unresolved:
+            existing = by_id.get(action['tracking_id'])
             if existing is None:
                 existing = {'name': action['name'], 'tracking_id': action['tracking_id'],
                             'amount': None, 'spent': None, 'share': self.config.share}
@@ -1462,32 +1350,28 @@ class App:
                                    ['上次操作结果尚未核实；请选中此行，点击“核实平台状态”'])
             existing['operation_id'] = action.get('operation_id')
             existing['original_evidence'] = action.get('evidence')
+            existing['original_status'] = action['status']
         self.tree.delete(*self.tree.get_children())
         for i, row in enumerate(self.rows):
-            status = row.get("status", "unknown")
-            if (status == 'triggered' and not self.automatic and row.get('tracking_id')
-                    and self.store.latest_action(row['tracking_id']) == 'not_submitted'):
-                status = 'not_submitted'
             amount = "-1（跳过）" if str(row.get("amount")) == "-1" else amount_text(row.get("amount"))
-            spent = amount_text(row.get("spent"))
-            if row.get('spent_is_lower_bound') and row.get('spent') is not None:
-                spent = '≥' + spent + '（待补全）'
-            self.tree.insert("", "end", iid=str(i), values=(row.get("name") or "（待填写）", amount, amount_text(row.get("share", self.config.share)), spent, STATUS_LABELS.get(status, status)), tags=(status,))
+            self.tree.insert("", "end", iid=str(i), values=(row.get("name") or "（待填写）",
+                amount, amount_text(row.get("share", self.config.share)), "", ""))
+            if previous_id and row.get('tracking_id') == previous_id:
+                self.tree.selection_set(str(i))
+                self.tree.focus(str(i))
+        if viewport:
+            self.tree.yview_moveto(viewport[0])
         self._refresh_fee_review()
 
     def refresh_events(self, *, show_status=False, strict=False):
         if not self.store or not self.config:
+            self.activity_report.clear()
             return
         try:
             events = self.store.events(limit=200)
-            lines = []
-            for event in events:
-                # Field names remain visible to avoid suppressing new audit fields.
-                lines.append(json.dumps(event, ensure_ascii=False, default=str, indent=2))
-            self.report_text.configure(state="normal")
-            self.report_text.delete("1.0", "end")
-            self.report_text.insert("end", "\n\n".join(lines) if lines else "暂时没有处理记录。日志保存在当前数据文件夹。")
-            self.report_text.configure(state="disabled")
+            unresolved = self.store.unresolved_actions()
+            self.activity_report.show(events, unresolved, ledger=self.config.period_id,
+                                      read_operation=self.store.operation_events)
             if show_status:
                 self._action_state("reports", "已完成")
                 self.status_var.set(f"处理汇报刷新已完成，显示最近 {len(events)} 条记录。")
@@ -1496,28 +1380,60 @@ class App:
                 raise
             self.status_var.set(f"汇报读取失败：{safe_error(exc)}")
 
+    def _locate_report_operation(self, operation_id, tracking_id):
+        if not self.config:
+            return
+        try:
+            pending = self.store.unresolved_actions()
+            if any(item.get('operation_id') == operation_id and item['tracking_id'] == tracking_id
+                   for item in pending):
+                self.refresh_rows(readonly=not self.recovery_mode)
+                for index, row in enumerate(self.rows):
+                    if (row.get('tracking_id') == tracking_id and row.get('operation_id') == operation_id
+                            and row.get('status') in {'recovery_pending', 'present_unresolved'}):
+                        self.review_tabs.select(self.overview_tab)
+                        self.tree.selection_set(str(index))
+                        self.tree.focus(str(index))
+                        self.tree.see(str(index))
+                        self._selection()
+                        self.desktop.row_menu.focus_set()
+                        self.status_var.set('已选中原操作对应的人员。打开“选中 Key 的操作”，选择“核实平台状态”。')
+                        return
+            self.refresh_events()
+            self.status_var.set('原操作已更新，请查看最新处理记录。')
+        except Exception as exc:
+            self.error('无法定位原操作', exc, dialog=False)
+
     def _selection(self, _event=None):
         row = self.selected()
+        self.desktop.row_menu.configure(state="normal" if row else "disabled")
         if not row:
+            self.detail_var.set("选中一行可查看完整 Tracking ID 和处理依据。")
             return
-        reason = row.get("reasons") or []
-        if isinstance(reason, list):
-            reason = "；".join(map(str, reason))
-        detail = f"{row.get('name', '')}：{reason or STATUS_LABELS.get(row.get('status'), '等待检查')}。平台标识：{row.get('tracking_id') or '尚未绑定'}"
-        if row.get('status') in {'recovery_pending', 'present_unresolved'}:
-            detail += '。原操作编号：' + (row.get('operation_id') or '旧记录未保存')
-            evidence = row.get('original_evidence')
-            if isinstance(evidence, dict):
-                detail += (f"；原个人额度 ¥{amount_text(evidence.get('amount'))}，"
-                           f"原公共额度 ¥{amount_text(evidence.get('share'))}，"
-                           f"原已知费用 ¥{amount_text(evidence.get('spent'))}。这些是原操作依据，不是新的撤销授权。")
-            else:
-                detail += '；旧记录没有保存完整规则依据，不补造。'
-        self.detail_var.set(detail)
+        review = self.fee_review.data
+        if review:
+            reviewed_row = review.rows[int(self.tree.selection()[0])]
+            self.detail_var.set(f"{row.get('name') or '待填写行'}　{review.detail(reviewed_row)}。"
+                                f"平台标识：{row.get('tracking_id') or '无活动绑定'}")
 
     def selected(self) -> dict | None:
         chosen = self.tree.selection()
         return self.rows[int(chosen[0])] if chosen else None
+
+    def _show_recorded_operation(self, store):
+        """Refresh the displays after a committed transition, outside the permit callback."""
+        if self.closing or self.store is not store:
+            return
+        try:
+            self.refresh_rows(readonly=not self.recovery_mode)
+            self.refresh_events()
+            self.desktop.update()
+        except Exception as exc:
+            self.error("操作记录显示未更新", exc, dialog=False)
+
+    def _new_browser(self):
+        from .browser_process import IsolatedBrowserService
+        return IsolatedBrowserService(diagnostics_dir=self.diagnostics_dir)
 
     def _browser_action(self, action: str, on_success: Callable, on_error: Callable | None = None,
                         on_progress: Callable | None = None, on_result_error: Callable | None = None,
@@ -1587,8 +1503,7 @@ class App:
 
         try:
             if self.browser is None or getattr(self.browser, 'closed', False):
-                from .browser_process import IsolatedBrowserService
-                self.browser = IsolatedBrowserService(diagnostics_dir=self.diagnostics_dir)
+                self.browser = self._new_browser()
             if action in {'revoke', 'prepare_revoke', 'verify_revoke'}:
                 if self.target_lock is None:
                     raise GuardError('未取得本机目标互斥，未派发平台处理。')
@@ -2064,6 +1979,7 @@ class App:
         self._diagnostic('start_blocked', stage=stage, reason_code=reason_code)
         if self.closing or self.window_destroyed:
             return
+        self.needs_scope_recovery = stage == 'shared_responsibility'
         self._action_state('start', '未开启')
         text = f'自动管理未开启：{safe_error(message)}（{reason_code}）'
         self.status_var.set(text)
@@ -2556,6 +2472,8 @@ class App:
                                           continuation=status not in {'pending', 'requested'})
             if status == 'unknown_result':
                 self._diagnostic('revocation_outcome', status=status)
+            if status in {'pending', 'requested', 'unknown_result'}:
+                self.root.after_idle(self._show_recorded_operation, operation_store)
         record('pending', ('用户选择强制删除，忽略额度与费用条件；' if forced else '达到额度，') +
                '准备通过官网网页单次撤销；尚未进入提交步骤',
                evidence=operation_store.action_evidence(row['name'], row['tracking_id']))
@@ -2706,6 +2624,7 @@ class App:
         def record(state, detail):
             operation_store.record_action(row['name'], row['tracking_id'], state, detail,
                                           operation_id=operation_id, continuation=True)
+            self.root.after_idle(self._show_recorded_operation, operation_store)
         try:
             self._claim_targets(self.last_keys)
             # Legacy manual browser handoff may be acted on outside our permit
@@ -2719,16 +2638,14 @@ class App:
         except Exception as exc:
             self.error("未执行操作：日志无法保存", exc)
             return
-        self.refresh_events()
+        self.root.after_idle(self._show_recorded_operation, operation_store)
 
         def done(_result):
             record("prepared", "已定位平台 Key 列表，等待用户自行点击删除及确认；未确认删除结果")
-            self.refresh_events()
             self._action_state("revoke", "待平台确认")
             self.status_var.set("请在 DeepSeek 页面核对并自行确认或取消。随后点击“核实平台状态”。")
         def failed(exc):
             record("unknown_result", "定位列表行未完成，未执行删除：" + safe_error(exc))
-            self.refresh_events()
         self._browser_action("prepare_revoke", done, on_error=failed, name=row["name"], tracking_id=row["tracking_id"])
 
     def verify_revoke(self):
@@ -2767,6 +2684,7 @@ class App:
                 # while its result is in flight. This authorizes no deletion.
                 operation_store.record_action(row['name'], row['tracking_id'], 'pending',
                     '用户请求只读核实平台状态；未授权或提交撤销', operation_id=operation_id, read_only=True)
+                self.root.after_idle(self._show_recorded_operation, operation_store)
             except Exception as exc:
                 self.error('未开始核实：记录无法保存', exc, dialog=False)
                 return
@@ -2801,7 +2719,7 @@ class App:
             if verified_absence:
                 return
             record("observation_failed", "本次只读核实失败；原操作责任与历史观察保留：" + safe_error(exc))
-            self.refresh_events()
+            self.root.after_idle(self._show_recorded_operation, operation_store)
         self._browser_action("verify_revoke", done, on_error=failed, name=row["name"], tracking_id=row["tracking_id"], known_keys=known_keys)
 
     def _close_local_locks(self):

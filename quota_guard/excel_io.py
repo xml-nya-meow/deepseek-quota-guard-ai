@@ -113,8 +113,9 @@ def read_people_workbook(path: str | Path, *, allow_unassigned=False) -> list[Pe
     rows and extra columns with formatting only are ignored. Formulas are never
     executed; only saved numeric caches may supply amounts. Missing results are
     errors, never zero. The caller separately enforces its configured person count.
-    External imports remain strict by default. The internal canonical table may
-    explicitly allow unassigned rows whose validated amounts persist as defaults.
+    By default, require names for nonnegative amounts. The editor's canonical
+    table and normal roster import both allow validated unnamed draft rows.
+    Recovery callers can keep the stricter validation.
     """
     try:
         if type(allow_unassigned) is not bool:

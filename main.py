@@ -2,26 +2,57 @@
 import argparse
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tkinter as tk
 from tkinter import messagebox
+
+
+def demo_launcher(root):
+    process = None
+
+    def launch():
+        nonlocal process
+        if process is not None and process.poll() is None:
+            messagebox.showinfo('示例账本已打开', '请切换到“示例账本”窗口，关闭后可重新体验。', parent=root)
+            return
+        command = [sys.executable]
+        if not getattr(sys, 'frozen', False):
+            command.append(str(Path(__file__).resolve()))
+        try:
+            process = subprocess.Popen(command + ['--demo'],
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        except OSError:
+            messagebox.showerror('示例未打开', '无法启动示例窗口，请确认已完整解压程序目录。', parent=root)
+    return launch
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data-dir', type=Path)
     modes = parser.add_mutually_exclusive_group()
+    modes.add_argument('--demo', action='store_true', help='Open the full desktop app with a temporary local example account')
     modes.add_argument('--smoke', action='store_true', help='Open then close UI using isolated local test data')
     modes.add_argument('--browser-smoke', action='store_true', help='Check bundled Chromium using about:blank only')
     modes.add_argument('--ai-smoke', action='store_true', help='Run one offline teaching case using the bundled model')
     modes.add_argument('--offline-acceptance', action='store_true', help='Check local workflows with synthetic transport in a NEW offline-acceptance-* directory')
     modes.add_argument('--operator-acceptance', action='store_true', help='Run bundled 4B/browser offline acceptance in an explicitly new isolated directory')
+    modes.add_argument('--portable-operator-acceptance', action='store_true', help='Check the packaged 4B on synthetic read and quota-crossing cases')
     args = parser.parse_args()
-    if (args.offline_acceptance or args.operator_acceptance or args.smoke) and args.data_dir is None:
+    if args.demo:
+        if args.data_dir is not None:
+            parser.error('The example always creates its own temporary ledger.')
+        from quota_guard.demo_workspace import run_demo
+        return run_demo()
+    if (args.offline_acceptance or args.operator_acceptance or args.portable_operator_acceptance or args.smoke) and args.data_dir is None:
         parser.error('This test mode requires an explicit --data-dir.')
-    if args.operator_acceptance:
+    if args.operator_acceptance or args.portable_operator_acceptance:
         try:
-            from quota_guard.operator_acceptance import run_operator_acceptance
-            result = run_operator_acceptance(args.data_dir)
+            if args.portable_operator_acceptance:
+                from quota_guard.operator_acceptance import run_portable_operator_acceptance as run_acceptance
+            else:
+                from quota_guard.operator_acceptance import run_operator_acceptance as run_acceptance
+            result = run_acceptance(args.data_dir)
         except Exception:
             return 1  # Never enter a real session or GUI after an offline failure.
         return 0 if (isinstance(result, dict) and result.get('passed') is True
@@ -34,8 +65,13 @@ def main():
         except Exception:
             return 1  # Never fall through to the real application or an error dialog.
         return 0 if result['passed'] is True else 1
-    base = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent / 'data'
-    home = (args.data_dir or base).resolve()
+    if args.data_dir is not None:
+        home = args.data_dir.resolve()
+    elif getattr(sys, 'frozen', False):
+        from quota_guard.workspace import portable_home
+        home = portable_home(Path(sys.executable).resolve().parent)
+    else:
+        home = Path(__file__).resolve().parent / 'data'
     folder = home
     if args.smoke:
         try:
@@ -94,6 +130,7 @@ def main():
         from quota_guard.workspace import current_ledger
         folder = current_ledger(home)
         app = App(root, folder, home_folder=home,
+                  on_demo=None if args.smoke else demo_launcher(root),
                   responsibility_directory=home / 'registry' if args.smoke else None)
         if args.smoke:
             root.after(1500, app.close)

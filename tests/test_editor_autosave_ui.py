@@ -40,7 +40,7 @@ class EditorAutosaveUiTests(unittest.TestCase):
 
     def update(self, name, amount):
         self.set_editor_fields(self.dialog, name, amount)
-        self.button(self.dialog, '更新选中行').invoke()
+        self.button(self.dialog, '立即保存此行').invoke()
 
     def stored(self):
         return DataStore(self.home).read_people()
@@ -66,7 +66,7 @@ class EditorAutosaveUiTests(unittest.TestCase):
     def test_cancel_keeps_saved_rows_without_saving_pending_input(self):
         self.update('合成甲', '0')
         self.set_editor_fields(self.dialog, '合成甲改名', '0.0000000001')
-        self.button(self.dialog, '取消').invoke()
+        self.button(self.dialog, '关闭').invoke()
         self.assertFalse(self.dialog.winfo_exists())
         self.assertEqual(self.stored(), [Person('合成甲', Decimal(0)), *self.initial[1:]])
         self.assert_not_running()
@@ -107,7 +107,7 @@ class EditorAutosaveUiTests(unittest.TestCase):
     def test_discard_restores_opening_rows_and_keeps_earlier_saves(self):
         self.update('新姓名', '0')
         self.button(self.dialog, '添加新行').invoke()
-        self.button(self.dialog, '不保存本次修改').invoke()
+        self.button(self.dialog, '还原到打开时').invoke()
         self.assertFalse(self.dialog.winfo_exists())
         self.assertEqual(self.stored(), self.initial)
         self.assertGreater(len(self.store.events()), 1)
@@ -132,7 +132,7 @@ class EditorAutosaveUiTests(unittest.TestCase):
         self.pump(.66)
         self.assertEqual(self.stored(), expected)
         self.errors.assert_not_called()  # Background validation uses inline feedback.
-        self.button(self.dialog, '取消').invoke()
+        self.button(self.dialog, '关闭').invoke()
         self.assertFalse(self.dialog.winfo_exists())
         self.assertEqual(self.stored(), expected)
         self.assertIn('未执行额外保存', self.app.status_var.get())
@@ -146,10 +146,10 @@ class EditorAutosaveUiTests(unittest.TestCase):
         self.assertEqual(self.store.workbook_path.read_bytes(), external_bytes)
         self.button(self.dialog, '撤销').invoke()  # Discard only the failed draft.
         self.button(self.dialog, '撤销').invoke()  # This reversal must check the hash.
-        self.button(self.dialog, '不保存本次修改').invoke()
+        self.button(self.dialog, '还原到打开时').invoke()
         self.assertTrue(self.dialog.winfo_exists())
         self.assertEqual(self.store.workbook_path.read_bytes(), external_bytes)
-        self.button(self.dialog, '取消').invoke()
+        self.button(self.dialog, '关闭').invoke()
         self.assertFalse(self.dialog.winfo_exists())
         self.assertEqual(self.stored(), external)
 
@@ -186,11 +186,11 @@ class EditorAutosaveUiTests(unittest.TestCase):
         self.assertEqual(self.store.workbook_path.read_bytes(), before)
         self.errors.assert_called_once()
         self.assertIn('重复', self.errors.call_args.args[1])
-        self.button(self.dialog, '取消').invoke()
+        self.button(self.dialog, '关闭').invoke()
         self.assertEqual(self.stored(), self.initial)
 
     def test_editor_entry_does_not_open_during_other_work_or_management(self):
-        self.button(self.dialog, '取消').invoke()
+        self.button(self.dialog, '关闭').invoke()
         for state in ('busy', 'observing', 'closing'):
             with self.subTest(state=state):
                 setattr(self.app, state, True)
@@ -203,11 +203,11 @@ class EditorAutosaveUiTests(unittest.TestCase):
 
     def test_reopened_editor_discard_keeps_previous_windows_saved_content(self):
         self.update('合成甲', '4')
-        self.button(self.dialog, '取消').invoke()
+        self.button(self.dialog, '关闭').invoke()
         self.app.edit_people()
         self.dialog = self.editor()
         self.update('合成甲', '3')
-        self.button(self.dialog, '不保存本次修改').invoke()
+        self.button(self.dialog, '还原到打开时').invoke()
         self.assertEqual(self.stored(), [Person('合成甲', Decimal(4)), *self.initial[1:]])
 
     def test_remove_uses_actual_selection_before_selection_callback_is_delivered(self):
@@ -221,7 +221,7 @@ class EditorAutosaveUiTests(unittest.TestCase):
     def test_update_rejects_unsettled_selection_instead_of_writing_wrong_row(self):
         self.set_editor_fields(self.dialog, '合成甲', '4')
         self.table.selection_set('1')
-        self.button(self.dialog, '更新选中行').invoke()
+        self.button(self.dialog, '立即保存此行').invoke()
         self.assertEqual(self.stored(), self.initial)
         self.errors.assert_called_once()
         self.pump()
@@ -233,7 +233,7 @@ class EditorAutosaveUiTests(unittest.TestCase):
         self.table.selection_set('1')
         # A unique name must not be protected merely by duplicate validation.
         self.set_editor_fields(self.dialog, '选择期间的新姓名', '3')
-        self.button(self.dialog, '更新选中行').invoke()
+        self.button(self.dialog, '立即保存此行').invoke()
         self.pump(.7)
         self.assertEqual(self.stored(), self.initial)
         self.button(self.dialog, '移除选中行').invoke()
@@ -246,7 +246,7 @@ class EditorAutosaveUiTests(unittest.TestCase):
         self.assert_not_running()
 
     def test_footer_stays_inside_window_at_high_scaling_and_minimum_size(self):
-        self.button(self.dialog, '取消').invoke()
+        self.button(self.dialog, '关闭').invoke()
         original_scaling = self.root.tk.call('tk', 'scaling')
         self.root.attributes('-alpha', 0)
         self.root.deiconify()
@@ -264,7 +264,7 @@ class EditorAutosaveUiTests(unittest.TestCase):
                     min_width, min_height = dialog.minsize()
                     dialog.geometry(f'{min_width}x{min_height}')
                     self.pump()
-                    for label in ('不保存本次修改', '撤销', '取消'):
+                    for label in ('还原到打开时', '撤销', '关闭'):
                         button = self.button(dialog, label)
                         self.assertTrue(button.winfo_ismapped())
                         left = button.winfo_rootx() - dialog.winfo_rootx()
@@ -273,7 +273,7 @@ class EditorAutosaveUiTests(unittest.TestCase):
                         self.assertGreaterEqual(top, 0)
                         self.assertLessEqual(left + button.winfo_width(), dialog.winfo_width())
                         self.assertLessEqual(top + button.winfo_height(), dialog.winfo_height())
-                    self.button(dialog, '取消').invoke()
+                    self.button(dialog, '关闭').invoke()
         finally:
             self.root.withdraw()
             self.root.tk.call('tk', 'scaling', original_scaling)

@@ -667,6 +667,14 @@ class DataStore:
         with self._connect() as db:
             return self._unresolved_records(self._action_history(db))
 
+    def roster_action_evidence(self) -> tuple[list[dict], set[str]]:
+        """Read original open operations and definite non-submissions in one history scan."""
+        self.load(require_workbook=False)
+        with closing(sqlite3.connect(self.db_path.as_uri() + "?mode=ro", uri=True, timeout=10)) as db:
+            history = self._action_history(db)
+        latest = {event["tracking_id"]: event["status"] for event in history}
+        return self._unresolved_records(history), {key for key, status in latest.items() if status == "not_submitted"}
+
     @staticmethod
     def _can_correct_setup(db) -> bool:
         return not db.execute("""SELECT
@@ -1428,6 +1436,25 @@ class DataStore:
             rows = db.execute("SELECT id,created,kind,payload FROM events ORDER BY id DESC LIMIT ?",
                               (max(1, min(int(limit), 10000)),)).fetchall()
         return [{"id": i, "created": t, "kind": k, **json.loads(p)} for i, t, k, p in rows]
+
+    def operation_events(self, operation_id: str, *, period_id: str) -> list[dict]:
+        """Read the selected operation from this ledger, including its responsibility receipts."""
+        if not isinstance(operation_id, str) or not operation_id:
+            raise GuardError("这条记录缺少原操作编号。")
+        try:
+            with closing(sqlite3.connect(self.db_path.as_uri() + "?mode=ro", uri=True, timeout=10)) as db:
+                db.execute("BEGIN")
+                if db.execute("SELECT value FROM meta WHERE key='period_id'").fetchone() != (period_id,):
+                    raise GuardError("当前账本已变更，请刷新处理记录。")
+                rows = db.execute("""
+                    SELECT id, created, kind, payload FROM events
+                    WHERE coalesce(json_extract(payload, '$.operation_id'),
+                                   json_extract(payload, '$.receipt.operation_id')) = ?
+                    ORDER BY id
+                """, (operation_id,))
+                return [{"id": i, "created": t, "kind": k, **json.loads(p)} for i, t, k, p in rows]
+        except sqlite3.Error:
+            raise GuardError("无法读取原操作的时间线，请刷新处理记录。") from None
 
     def export_logs(self):
         """SQLite is authoritative. Rebuilding daily files makes crash recovery idempotent."""

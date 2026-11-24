@@ -108,6 +108,23 @@ def apply_theme(root: tk.Misc, theme: str) -> None:
                     foreground=p['text'], background=p['background'])
     style.configure('Muted.TLabel', foreground=p['muted'], background=p['background'])
     style.configure('Warn.TLabel', foreground=p['warning'], background=p['background'])
+    banner = '#e5eff6' if theme == 'light' else '#203447'
+    ink = '#19465d' if theme == 'light' else '#cce6fc'
+    style.configure('Workspace.Hero.TFrame', background=banner)
+    style.configure('Workspace.Stage.TLabel', background=banner, foreground=ink,
+                    font=('Microsoft YaHei UI', 10, 'bold'))
+    style.configure('Workspace.Heading.TLabel', background=banner, foreground=p['text'],
+                    font=('Microsoft YaHei UI', 18, 'bold'))
+    style.configure('Workspace.Hint.TLabel', background=banner, foreground=ink)
+    style.configure('Workspace.State.TLabel', background=banner, foreground=ink,
+                    font=('Microsoft YaHei UI', 10, 'bold'))
+    style.configure('Workspace.Empty.TLabel', background=p['panel'], foreground=p['muted'])
+    style.configure('Workspace.Primary.TButton', background=p['selection'], foreground='#ffffff',
+                    padding=(14, 6), font=('Microsoft YaHei UI', 10, 'bold'))
+    style.map('Workspace.Primary.TButton',
+              background=[('disabled', p['disabled_background']), ('pressed', '#144a74'),
+                          ('active', '#205e8a')],
+              foreground=[('disabled', p['disabled']), ('active', '#ffffff')])
     style.configure('TLabelframe', background=p['background'], bordercolor=p['border'])
     style.configure('TLabelframe.Label', background=p['background'], foreground=p['text'])
 

@@ -118,7 +118,7 @@ class DefaultsUiTests(unittest.TestCase):
         dialog = self.editor()
         table = next(w for w in descendants(dialog) if isinstance(w, ttk.Treeview))
         self.assertEqual([table.item(i, 'values')[1] for i in table.get_children()], ['0.1'] * 3)
-        self.button(dialog, '取消').invoke()
+        self.button(dialog, '关闭').invoke()
         self.assertEqual(self.store.workbook_path.read_bytes(), before)
         self.assertFalse(self.app.recovery_mode)
 
@@ -210,8 +210,8 @@ class DefaultsUiTests(unittest.TestCase):
         self.assertEqual(self.app.store.read_people(), expected)
         table = next(widget for widget in descendants(self.editor()) if isinstance(widget, ttk.Treeview))
         shown = [table.item(item, 'values') for item in table.get_children()]
-        self.assertEqual(shown, [('', '0.0000000001')] * 2)
-        self.button(self.editor(), '取消').invoke()
+        self.assertEqual(shown, [('', '0.0000000001', '待填写')] * 2)
+        self.button(self.editor(), '关闭').invoke()
         self.assertEqual(self.app.folder, destination.resolve())
         self.assertEqual(self.app.store.read_people(), expected)
         self.assertEqual(DataStore(destination).read_people(), expected)
@@ -219,7 +219,7 @@ class DefaultsUiTests(unittest.TestCase):
         self.app.edit_people()
         reopened = next(widget for widget in descendants(self.editor()) if isinstance(widget, ttk.Treeview))
         self.assertEqual([reopened.item(item, 'values') for item in reopened.get_children()], shown)
-        self.button(self.editor(), '取消').invoke()
+        self.button(self.editor(), '关闭').invoke()
         self.assertEqual(self.original_ledger_bytes(), before)
         self.assertFalse(self.app.observing)
         self.assertFalse(self.app.automatic)
@@ -340,7 +340,7 @@ class DefaultsUiTests(unittest.TestCase):
         dialog = self.editor()
         self.set_editor_fields(dialog, '新人员', '0')
         with patch('quota_guard.ui.messagebox.askyesno', return_value=True) as ask:
-            self.button(dialog, '更新选中行').invoke()
+            self.button(dialog, '立即保存此行').invoke()
         ask.assert_not_called()
         self.assertEqual(self.store.read_people(), [Person('新人员', Decimal(0)),
                                                    Person('', Decimal(0)), Person('', Decimal(0))])
@@ -362,7 +362,7 @@ class DefaultsUiTests(unittest.TestCase):
         main_rows = [self.app.tree.item(item, 'values') for item in self.app.tree.get_children()]
         self.assertEqual([values[1] for values in main_rows], ['0'] * 3)
         self.assertTrue(all('待填写' in values[-1] and '跳过' not in values[-1] for values in main_rows))
-        self.button(self.editor(), '取消').invoke()
+        self.button(self.editor(), '关闭').invoke()
         self.assertEqual(DataStore(destination).read_people(), expected)
         self.app.load_folder()
         self.assertEqual(self.app.store.read_people(), expected)
@@ -370,7 +370,7 @@ class DefaultsUiTests(unittest.TestCase):
         self.app.edit_people()
         table = next(widget for widget in descendants(self.editor()) if isinstance(widget, ttk.Treeview))
         self.assertEqual([table.item(item, 'values')[1] for item in table.get_children()], ['0'] * 3)
-        self.button(self.editor(), '取消').invoke()
+        self.button(self.editor(), '关闭').invoke()
 
     def test_all_unnamed_zero_rows_cannot_start_collection_or_automatic_management(self):
         self.store.save_people([Person('', Decimal(0))] * 3, allow_unassigned=True)
@@ -393,7 +393,7 @@ class DefaultsUiTests(unittest.TestCase):
         self.app.edit_people()
         dialog = self.editor()
         self.set_editor_fields(dialog, '新填写人员', str(amount))
-        self.button(dialog, '更新选中行').invoke()
+        self.button(dialog, '立即保存此行').invoke()
         expected = [Person('新填写人员', amount), Person('', amount), Person('', amount)]
         self.assertEqual(self.store.read_people(), expected)
         self.assertEqual(DataStore(self.home).read_people(), expected)

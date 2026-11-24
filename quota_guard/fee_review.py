@@ -28,6 +28,7 @@ class FeeReviewData:
     identity_current: bool
     fees_current: bool
     coverage_text: str = ""
+    management_running: bool = False
 
     def candidate(self, row):
         return self.identity_current and eligible_for_automatic_action(row, fees_current=self.fees_current)
@@ -35,22 +36,37 @@ class FeeReviewData:
     def state(self, row):
         status = row.get("status")
         if status == "unassigned":
-            return "待填写 · 跳过"
+            return "待填写姓名 · 不参与管理"
         if status == "skipped":
             return "跳过管理"
-        if status == "retired":
-            return "已移除 · 留存账目"
-        if status in {"recovery_pending", "present_unresolved"}:
+        if status in {"retired", "absent_verified"}:
+            return "已核实平台列表中无此 Key"
+        if status == "present_unresolved":
+            return "核实时仍在 · 原操作待核实"
+        if status == "recovery_pending":
+            if row.get("original_status") == "requested":
+                return "许可可能已发出 · 原操作待核实"
             return "原操作待核实"
         if self.candidate(row):
-            return "已达线 · 待程序复核"
-        if not row.get("tracking_id"):
-            return "待核对绑定"
-        if not self.identity_current:
-            return "待重新核验"
-        if not self.fees_current or not row.get("complete"):
-            return "费用待补全"
-        return "额度内" if status == "ok" else "待核实"
+            state = "已达线 · 管理运行中" if self.management_running else "已达线 · 管理未开启"
+        elif not row.get("tracking_id"):
+            state = "待核对绑定"
+        elif not self.identity_current:
+            state = "待重新核验"
+        elif not self.fees_current or row.get("complete") is not True:
+            state = "费用待补全"
+        else:
+            state = "额度内" if status == "ok" else "待核实"
+        if row.get("last_not_submitted"):
+            state += " · 上次未提交"
+        return state
+
+    def tag(self, row):
+        if self.candidate(row):
+            return "triggered"
+        if row.get("status") in {"skipped", "unassigned", "retired", "absent_verified"}:
+            return "skipped"
+        return "" if self.state(row) == "额度内" else "unknown"
 
     def managed(self, row):
         return bool(row.get("name")) and row.get("amount") is not None and row["amount"] >= 0
@@ -74,11 +90,30 @@ class FeeReviewData:
         if row.get("spent") is None:
             return "未查询" if row.get("status") in {"skipped", "unassigned"} else "未知"
         amount = amount_text(row["spent"])
+        historical = not self.fees_current or row.get("status") in {"retired", "skipped", "unassigned"}
         if row.get("spent_is_lower_bound"):
-            return f"≥ {amount}（下界）"
-        if not self.fees_current or row.get("status") in {"retired", "skipped", "unassigned"}:
+            return f"≥ {amount}（历史下界）" if historical else f"≥ {amount}（下界）"
+        if historical:
             return f"{amount}（历史）"
         return amount
+
+    def detail(self, row):
+        facts = [self.state(row), *(row.get("reasons") or ())]
+        if row.get("spent_is_lower_bound"):
+            facts.append("表内累计费用是已知下界")
+        if row.get("status") in {"recovery_pending", "present_unresolved"}:
+            facts.append("原操作编号：" + (row.get("operation_id") or "旧记录未保存"))
+            evidence = row.get("original_evidence")
+            if isinstance(evidence, dict):
+                facts.append(f"原个人额度 ¥{amount_text(evidence.get('amount'))}，"
+                             f"原公共额度 ¥{amount_text(evidence.get('share'))}，"
+                             f"原已知费用 ¥{amount_text(evidence.get('spent'))}")
+            else:
+                facts.append("旧记录没有保存完整规则依据")
+        if row.get("start_date") and row.get("end_date"):
+            prefix = "本次" if self.identity_current else "上次"
+            facts.append(f"{prefix}查询期间为 {row['start_date']} 至 {row['end_date']}（UTC+8）")
+        return "。".join(facts)
 
 
 class FeeReviewFrame(ttk.Frame):
@@ -176,10 +211,10 @@ class FeeReviewFrame(ttk.Frame):
     def show(self, data: FeeReviewData):
         if self.data == data:
             return
-        previous_id = self.target_id.get()
+        previous_id = self._selected_id()
         self.data = data
         self.context.set(f"{data.account_text}   ·   {data.basis_text}\n{data.observed_text}")
-        self.budget.set(data.budget_text + "。个人或公共额度任一达线即进入复核。")
+        self.budget.set(data.budget_text + "。个人或公共额度任一达线后，开启管理时由程序复核。")
         coverage = data.coverage_text
         if any(data.needs_fees(row) and data.candidate(row) for row in data.rows):
             coverage += " 零额度且身份已核验的行可以同时计入待补全和达线待处理。"
@@ -189,7 +224,7 @@ class FeeReviewFrame(ttk.Frame):
         self._render_rows(previous_id=previous_id)
 
     def _render_rows(self, *_event, previous_id=None):
-        previous_id = self.target_id.get() if previous_id is None else previous_id
+        previous_id = self._selected_id() if previous_id is None else previous_id
         view = self.tree.yview()
         self.tree.delete(*self.tree.get_children())
         self.target_id.set("")
@@ -210,15 +245,8 @@ class FeeReviewFrame(ttk.Frame):
                     or (selected_filter == "跳过" and row.get("status") not in {"skipped", "unassigned"})
                     or (selected_filter == "待核实原操作" and row.get("status") not in {"recovery_pending", "present_unresolved"})):
                 continue
-            tag = ""
-            if self.data.candidate(row):
-                tag = "triggered"
-            elif row.get("status") in {"skipped", "unassigned", "retired"}:
-                tag = "skipped"
-            elif state != "额度内":
-                tag = "unknown"
             self.tree.insert("", "end", iid=str(index), values=(name or "（待填写）", self.data.expense(row) + " ",
-                amount_text(row.get("amount")) + " ", amount_text(row.get("share")) + " ", state), tags=(tag,))
+                amount_text(row.get("amount")) + " ", amount_text(row.get("share")) + " ", state), tags=(self.data.tag(row),))
             count += 1
             if previous_id and key == previous_id:
                 self.tree.selection_set(str(index))
@@ -227,17 +255,18 @@ class FeeReviewFrame(ttk.Frame):
         self._select()
         self.shown.set(f"显示 {count} / {len(self.data.rows)} 行")
 
+    def _selected_id(self):
+        selection = self.tree.selection()
+        if self.data is None or not selection:
+            return ""
+        return self.data.rows[int(selection[0])].get("tracking_id") or ""
+
     def _select(self, _event=None):
         selection = self.tree.selection()
         if self.data is None or not selection:
+            self.target_id.set("")
+            self.detail.set("选中一行可核对完整标识、达线依据和费用覆盖。")
             return
         row = self.data.rows[int(selection[0])]
         self.target_id.set(row.get("tracking_id") or "")
-        reason = "；".join(row.get("reasons") or ())
-        if row.get("spent_is_lower_bound"):
-            reason += "。部分历史费用待补全，表内金额是已知下界"
-        if not row.get("tracking_id"):
-            reason += "。当前没有已绑定的活动 Tracking ID"
-        if row.get("start_date") and row.get("end_date"):
-            reason += f"。此 Key 的查询期间为 {row['start_date']} 至 {row['end_date']}（UTC+8）"
-        self.detail.set(f"{row.get('name') or '待填写行'}　{self.data.state(row)}　{reason.strip('。')}".strip())
+        self.detail.set(f"{row.get('name') or '待填写行'}　{self.data.detail(row)}")

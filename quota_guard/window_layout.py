@@ -22,8 +22,9 @@ class ScrollableContent(ttk.Frame):
     than a forced large Toplevel minimum. Mouse wheel bindings are scoped to
     this Toplevel and do not take scrolling away from a table or text widget.
     """
-    def __init__(self, parent, *, padding=0):
+    def __init__(self, parent, *, padding=0, fit_width=False):
         super().__init__(parent)
+        self.fit_width = fit_width
         self.rowconfigure(0, weight=1)
         self.columnconfigure(0, weight=1)
         background = ttk.Style(self).lookup('TFrame', 'background') or '#f0f0f0'
@@ -33,7 +34,8 @@ class ScrollableContent(ttk.Frame):
         self.canvas.configure(yscrollcommand=self.vertical.set, xscrollcommand=self.horizontal.set)
         self.canvas.grid(row=0, column=0, sticky='nsew')
         self.vertical.grid(row=0, column=1, sticky='ns')
-        self.horizontal.grid(row=1, column=0, sticky='ew')
+        if not fit_width:
+            self.horizontal.grid(row=1, column=0, sticky='ew')
         self.content = ttk.Frame(self.canvas, padding=padding)
         self.item = self.canvas.create_window((0, 0), window=self.content, anchor='nw')
         self._pending = None
@@ -62,7 +64,7 @@ class ScrollableContent(ttk.Frame):
                 wrap = max(160, width - padding)
                 if int(label.cget('wraplength')) != wrap:
                     label.configure(wraplength=wrap)
-        content_width = max(width, self.content.winfo_reqwidth())
+        content_width = width if self.fit_width else max(width, self.content.winfo_reqwidth())
         content_height = max(height, self.content.winfo_reqheight())
         self.canvas.itemconfigure(self.item, width=content_width, height=content_height)
         self.canvas.configure(scrollregion=(0, 0, content_width, content_height))

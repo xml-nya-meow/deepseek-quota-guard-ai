@@ -486,6 +486,27 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.store.read_people(), [Person('外部修改', Decimal(25))])
         self.mocks[1].assert_called_once()
 
+    def test_normal_import_preserves_unnamed_amounts_and_counts_only_named_targets(self):
+        from openpyxl import Workbook
+        source = self.folder / 'partial-list.xlsx'
+        book = Workbook()
+        for row in [('API名/人员名', '个人金额（元）'), (None, '0'), ('甲', '0'),
+                    (None, '0.025'), ('乙', '-1'), ('丙', '0.25')]:
+            book.active.append(row)
+        book.save(source)
+        book.close()
+        with patch('quota_guard.ui.filedialog.askopenfilename', return_value=str(source)):
+            self.app.import_people()
+        self.assertEqual([(p.name, p.amount) for p in self.store.read_people()],
+                         [('', Decimal(0)), ('甲', Decimal(0)), ('', Decimal('0.025')),
+                          ('乙', Decimal(-1)), ('丙', Decimal('0.25'))])
+        confirmation = self.mocks[2].call_args.args[1]
+        for fact in ('管理 2 人', '零额度 1 人', '跳过 1 个', '待填写 2 行'):
+            self.assertIn(fact, confirmation)
+            self.assertIn(fact, self.app.status_var.get())
+        self.assertFalse(self.store.active_bindings())
+        self.assertFalse(self.app.automatic)
+
     def test_start_before_login_does_not_navigate_or_enable_management(self):
         browser = ControlledBrowser(); self.app.browser = browser
         self.app.start()

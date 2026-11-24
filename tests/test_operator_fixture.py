@@ -36,6 +36,23 @@ class OfflineBackendTests(unittest.TestCase):
     def key(self, identity):
         return next(key for key in self.platform.keys if key['tracking_id'] == identity)
 
+    def test_portable_receipts_track_cost_change_and_independent_list_read(self):
+        platform = OfflinePlatform(seed=7719, cost='0.80', names=('Cedar', 'Maple'))
+        self.assertCountEqual([key['name'] for key in platform.keys],
+                              ['Cedar', 'Maple', 'DeepSeek Harness'])
+        payload = cost_path([platform.target_id])
+        platform.handle('GET', payload)
+        platform.cost = '1.05'
+        platform.handle('GET', payload)
+        key = next(key for key in platform.keys if key['tracking_id'] == platform.target_id)
+        platform.handle('POST', EDIT, json.dumps(delete_payload(key)).encode())
+        platform.handle('GET', LIST, source='api-context')
+        truth = platform.snapshot()
+        self.assertEqual([e['amount'] for e in truth['events'] if e['kind']=='cost_read'], ['0.80', '1.05'])
+        self.assertEqual(truth['events'][-1]['source'], 'api-context')
+        self.assertCountEqual(truth['events'][-1]['ids'], [k['tracking_id'] for k in truth['keys']])
+        self.assertNotIn(platform.target_id, truth['events'][-1]['ids'])
+
     def test_envelope_and_normal_dsh_identity_contract(self):
         self.assertEqual(envelope({'x': 1}), {'code': 0, 'msg': '', 'data':
             {'biz_code': 0, 'biz_msg': '', 'biz_data': {'x': 1}}})

@@ -321,6 +321,16 @@ class RecoveryGuiTests(_LedgerFixture, unittest.TestCase):
         self.assertEqual(self.store.workbook_path.read_bytes(),
                          b"synthetic damaged workbook; preserve these bytes")
 
+    def test_timeline_locates_an_original_operation_even_while_table_is_damaged(self):
+        self.open_app(damage="corrupt")
+        before = self.store.events()
+        self.app.activity_report.locate.invoke()
+        self.assertEqual(self.app.selected()['tracking_id'], self.target)
+        self.assertEqual(self.app.selected()['operation_id'], 'recovery-operation')
+        self.assertEqual(self.app.review_tabs.select(), str(self.app.overview_tab))
+        self.assertEqual(self.app.browser.calls, [])
+        self.assertEqual(self.store.events(), before)
+
     def test_recovery_disables_controls_and_direct_new_operation_entry_points(self):
         self.open_app(damage="missing")
         self.select_target()

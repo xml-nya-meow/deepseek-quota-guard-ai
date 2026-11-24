@@ -9,10 +9,31 @@ from .core import DataStore, GuardError, TZ
 POINTER = "当前账本.json"
 
 
+def has_saved_data(folder: Path) -> bool:
+    """A partial ledger or an interrupted initialization still belongs to its owner."""
+    if not folder.exists():
+        return False
+    names = {DataStore.CONFIG, DataStore.WORKBOOK, DataStore.DATABASE,
+             DataStore.DATABASE + "-wal", DataStore.DATABASE + "-shm"}
+    return any(item.name in names or item.name.startswith(
+        ("运行日志-", "运行摘要-", ".initial", ".初始化", "初始化")) for item in folder.iterdir())
+
+
+def portable_home(program_dir: Path) -> Path:
+    """Keep existing root-based installations on their original ledger and preferences."""
+    from .appearance import APPEARANCE_FILENAME
+    from .preferences import PREFERENCES_FILENAME
+    legacy = (POINTER, APPEARANCE_FILENAME, PREFERENCES_FILENAME, "账本", ".运行锁")
+    if has_saved_data(program_dir) or any((program_dir / name).exists() or
+                                          (program_dir / name).is_symlink() for name in legacy):
+        return program_dir
+    return program_dir / "用户数据"
+
+
 def current_ledger(home: Path) -> Path:
     home = Path(home).resolve()
     pointer = home / POINTER
-    if not pointer.exists():
+    if not pointer.exists() and not pointer.is_symlink():
         return home
     try:
         value = json.loads(pointer.read_text(encoding="utf-8"))

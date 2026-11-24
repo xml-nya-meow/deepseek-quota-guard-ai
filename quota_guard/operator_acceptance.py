@@ -71,6 +71,8 @@ def _offline_worker(connection, *, config):
     socket.socket.connect_ex=loopback_connect_ex
 
     def trace(event):
+        if not config.get('trace'):
+            return
         with Path(config['trace']).open('a',encoding='utf-8') as stream:
             stream.write(json.dumps(event,ensure_ascii=False,default=str)+'\n')
 
@@ -80,7 +82,8 @@ def _offline_worker(connection, *, config):
         value=original_consume(permit)
         trace({'kind':'permit_consumed','at':time.monotonic()})
         return value
-    DeletePermit.consume_for_click=traced_consume
+    if config.get('trace'):
+        DeletePermit.consume_for_click=traced_consume
 
     class DisabledRuntime:
         def start(self,**unused):pass
@@ -113,11 +116,13 @@ def _offline_worker(connection, *, config):
             actual._offline_request=proxy.request
             self.context=actual
             actual.route('**/*',proxy.route_bottom)
+            actual.route_web_socket('**/*',lambda ws: ws.close())
             self.page=actual.new_page();self.page.set_default_timeout(12000)
         def _get_operator_runtime(self,*,deadline):
             if getattr(self,'_operator_runtime',None) is None:
+                runtime_type=TracedRuntime if config.get('trace') else OperatorRuntime
                 self._operator_runtime=(DisabledRuntime() if config.get('no_model') else
-                    TracedRuntime(assets=config['assets'],state_dir=config['model_state'],emit=self._log))
+                    runtime_type(assets=config['assets'],state_dir=config['model_state'],emit=self._log))
             self._operator_runtime.start(deadline=deadline)
             return self._operator_runtime
         def _create_cost_reader(self,*,deadline):
@@ -179,15 +184,136 @@ class _Driver:
             except tk.TclError:pass
 
 
+def _verify_initial_review(app, store, platform, amount):
+    """Check the visible selected row, durable ledger and independent backend."""
+    review = app.fee_review
+    _check(app.review_tabs.tab(app.review_tabs.select(), 'text') == '费用核对', 'REVIEW_TAB_NOT_SELECTED')
+    _check(review.data.identity_current and review.data.fees_current, 'REVIEW_EVIDENCE_NOT_CURRENT')
+    item = next(i for i in review.tree.get_children() if review.tree.item(i, 'values')[0] == 'Cedar')
+    review.tree.selection_set(item)
+    review.tree.event_generate('<<TreeviewSelect>>')
+    app.root.update()
+    values = review.tree.item(item, 'values')
+    row = next(r for r in store.read_evaluation() if r['name'] == 'Cedar')
+    _check(review.target_id.get() == row['tracking_id'] == platform.target_id, 'REVIEW_ID_MISMATCH')
+    _check(row['spent'] == Decimal(values[1]) == Decimal(amount), 'DISPLAYED_OR_SAVED_COST_MISMATCH')
+    _check(row['complete'] and row['amount'] == Decimal('1.00') and values[-1] == '额度内',
+           'FIRST_READ_NOT_BELOW_LIMIT')
+    _check(review.data.counts() == (1, 1, 0, 0), 'REVIEW_ROSTER_MISMATCH')
+    _check(not app.observing and not app.automatic and store.current_snapshot_id(), 'REVIEW_ALREADY_ACTIVE')
+    truth = platform.snapshot()
+    reads = [e for e in truth['events'] if e['kind'] == 'cost_read']
+    _check(len(reads) == 1 and reads[0]['amount'] == amount and
+           reads[0]['ids'] == [platform.target_id], 'FIRST_READ_SCOPE_OR_AMOUNT')
+    _check(truth['keys'] == truth['initial_keys'] and
+           not any(e['kind'] == 'post_arrival' for e in truth['events']), 'WRITE_BEFORE_START')
+    return {'tab':'费用核对', 'values':values, 'tracking_id':review.target_id.get(),
+            'counts':review.data.counts(), 'account':review.data.account_text,
+            'period':review.data.basis_text, 'snapshot_id':store.current_snapshot_id(),
+            'saved_amount':str(row['spent']), 'management_active':False}
+
+
+def _unknown_checkpoint(app, platform):
+    record = app.store.latest_action_record(platform.target_id)
+    _check(record and record['status'] == 'unknown_result' and record.get('operation_id'),
+           'LOST_RESPONSE_NOT_UNKNOWN')
+    _check(not app.automatic and not app.observing and app.pending_start is None,
+           'UNKNOWN_DID_NOT_STOP_AUTOMATIC_MANAGEMENT')
+    obligations = app.responsibility_gate.registry.open_obligations()
+    _check(len(obligations) == 1 and obligations[0]['phase'] == 'possible_send' and
+           obligations[0]['receipt']['operation_id'] == record['operation_id'],
+           'UNKNOWN_RESPONSIBILITY_LOST')
+    truth = platform.snapshot()
+    posts = [event for event in truth['events'] if event['kind'] == 'post_arrival']
+    _check(len(posts) == 1 and posts[0]['source'] == 'browser', 'UNKNOWN_POST_COUNT')
+    expected_keys = [key for key in truth['initial_keys'] if key['tracking_id'] != platform.target_id]
+    _check(truth['keys'] == expected_keys, 'UNKNOWN_TARGET_OR_CONTROL_MISMATCH')
+    return record, len(posts)
+
+
+def _verify_from_report(driver, platform, record):
+    app = driver.app
+    app.review_tabs.select(app.reports_tab)
+    report = app.activity_report
+    report.tree.selection_set(str(record['id']))
+    report.tree.event_generate('<<TreeviewSelect>>')
+    app.root.update()
+    operation = record['operation_id']
+    _check(operation in report.reference.get() and platform.target_id in report.reference.get(),
+           'UNKNOWN_NOT_VISIBLE_IN_REPORT')
+    report.locate.invoke()
+    row = app.selected()
+    _check(row and row.get('tracking_id') == platform.target_id and row.get('operation_id') == operation,
+           'RECOVERY_ORIGINAL_ROW_NOT_SELECTED')
+    # Exclude the login page's list query. Verification must make a fresh GET.
+    mark = len(platform.snapshot()['events'])
+    app.buttons['verify'].invoke()
+    driver.idle(60)
+    truth = platform.snapshot()
+    verification = truth['events'][mark:]
+    _check(not any(event['kind'] in ('post_arrival', 'cost_read') for event in verification),
+           'RECOVERY_NOT_READ_ONLY')
+    receipts = [event for event in verification if event['kind'] == 'identity_read' and
+                event['source'] == 'browser' and platform.target_id not in event['ids'] and
+                platform.control_id in event['ids']]
+    _check(receipts, 'RECOVERY_FRESH_LIST_OR_CONTROL_MISSING')
+    verified = app.store.latest_action_record(platform.target_id)
+    _check(verified['operation_id'] == operation and verified['status'] == 'absent_verified',
+           'RECOVERY_OPERATION_OR_RESULT_CHANGED')
+    return {'verified_operation_id': verified['operation_id'],
+            'post_count_after_verification': sum(e['kind'] == 'post_arrival' for e in truth['events']),
+            'fresh_list_receipts': len(receipts), 'control_id': platform.control_id,
+            'target_id': platform.target_id}
+
+
+def _verify_portable_outcome(store, platform, truth, costs, trace, action, first, recovery=None):
+    stamp = int(datetime.fromisoformat(platform.today).replace(tzinfo=TZ).timestamp())
+    _check(all(e['source']=='browser' and e['start']==[str(stamp)] and e['end']==[str(stamp+86400)]
+               for e in costs), 'WRONG_DATE_OR_COST_SOURCE')
+    actions = [json.loads(line) for line in trace.read_text(encoding='utf-8').splitlines()]
+    phases = [e['task']['kind'] for e in actions if e['kind']=='model_action']
+    _check('READ' in phases, 'NO_ACTUAL_READ_MODEL_ACTION')
+    if action == 'review':
+        _check(len(costs)==1 and 'DELETE' not in phases, 'READ_ONLY_ACTION_COUNT')
+        return {'model_actions':phases}
+    _check('DELETE' in phases and len(costs)>=2 and costs[0]['amount']==first
+           and all(e['amount']==platform.cost for e in costs[1:]), 'CROSSING_NOT_OBSERVED')
+    events = truth['events']
+    writes = [e for e in events if e['kind']=='delete_applied']
+    _check(len(writes)==1 and writes[0]['target_id']==platform.target_id
+           and costs[1]['monotonic'] < writes[0]['monotonic'], 'WRONG_DELETION_OR_ORDER')
+    if recovery is None:
+        receipts = sum(e['kind']=='identity_read' and e['source']=='api-context'
+                       and e['monotonic']>writes[0]['monotonic'] and platform.target_id not in e['ids']
+                       and platform.control_id in e['ids'] for e in events)
+        _check(receipts, 'MISSING_INDEPENDENT_LIST_CONFIRMATION')
+        receipt_source = 'api-context'
+    else:
+        receipts = recovery['fresh_list_receipts']
+        receipt_source = 'reloaded browser list during read-only verification'
+    row = next(r for r in store.read_evaluation() if r['name']=='Cedar')
+    _check(row['spent']==Decimal(platform.cost), 'CROSSING_NOT_PERSISTED')
+    return {'model_actions':phases,'crossed_amount':str(row['spent']),
+            'independent_absence_receipts':receipts, 'absence_receipt_source':receipt_source}
+
+
 def _one_case(base,case,assets,chromium):
     from .responsibility_gate import ResponsibilityGate,action_history
     from .responsibility_registry import ResponsibilityRegistry
     folder=base/case['name'];folder.mkdir()
-    platform=OfflinePlatform(seed=case['seed'],variant=case.get('variant','direct'),cost=case.get('cost','1.25'),
-        age_days=case.get('age_days',0),fault=case.get('fault','none'),similar_ids=case.get('similar_ids',False)).start()
+    action=case.get('action','automatic')
+    portable=action in ('review','crossing')
+    names=('Cedar','Maple') if portable else ('Synthetic target','Independent control')
+    first=case.get('initial_cost',case.get('cost','1.25'))
+    platform=OfflinePlatform(seed=case['seed'],variant=case.get('variant','direct'),cost=first,
+        age_days=case.get('age_days',0),fault=case.get('fault','none'),similar_ids=case.get('similar_ids',False),
+        names=names).start()
     registry=folder/'registry'
-    store=DataStore(folder/'ledger');store.initialize(14,'1500',datetime.now(TZ).date().isoformat(),fee_basis='key_lifetime')
-    store.save_people([Person('',Decimal(-1))]*12+[Person('Synthetic target',Decimal(case.get('quota','1'))),Person('Independent control',Decimal(-1))])
+    people=[] if portable else [Person('',Decimal(-1))]*12
+    people.extend([Person(names[0],Decimal(case.get('quota','1'))),Person(names[1],Decimal(-1))])
+    store=DataStore(folder/'ledger');store.initialize(len(people),'10' if portable else '1500',
+        datetime.now(TZ).date().isoformat(),fee_basis='key_lifetime')
+    store.save_people(people)
     ResponsibilityGate(registry).initialize([store])
     trace=folder/'model-trace.jsonl'
     config={'origin':platform.origin,'assets':str(assets),'chromium':str(chromium),
@@ -216,8 +342,15 @@ def _one_case(base,case,assets,chromium):
                 _check(not app.collection_has_fees,'NO_MODEL_FEE_APPLIED')
             else:
                 _check(app.collection_has_fees and app.session_ready,'READ_NOT_APPLIED: '+app.status_var.get())
-                if case.get('action','automatic')=='automatic':
-                    app.start()
+                if portable:
+                    result['initial_review']=_verify_initial_review(app,store,platform,first)
+                if action in ('automatic','crossing'):
+                    if action=='crossing':
+                        with platform.lock:
+                            platform.cost=case['cost']
+                        app.fee_review.start_button.invoke()
+                    else:
+                        app.start()
                     _check(app.observing,'AUTO_START_FAILED: '+app.status_var.get())
                     if Decimal(case.get('cost','1.25'))<Decimal(case.get('quota','1')):
                         # Actual second automatic read, not just successful start.
@@ -226,24 +359,38 @@ def _one_case(base,case,assets,chromium):
                     else:
                         driver.until(lambda:bool(store.latest_action_record(platform.target_id)) and
                             store.latest_action_record(platform.target_id).get('status') in ('absent_verified','unknown_result','prepare_failed','not_submitted','failed'),300)
-                        driver.idle();app.stop(quiet=True)
+                        driver.idle()
                         if case.get('fault')=='response_drop':
-                            before=store.latest_action_record(platform.target_id)
-                            _check(before['status']=='unknown_result','LOST_RESPONSE_NOT_UNKNOWN')
-                            _check(bool(ResponsibilityRegistry(registry).open_obligations()),'UNKNOWN_RESPONSIBILITY_LOST')
+                            before, post_count = _unknown_checkpoint(app, platform)
                             result['unknown_operation']=before['operation_id']
-                            row=next(r for r in app.rows if r.get('tracking_id')==platform.target_id)
-                            with patch.object(app,'selected',return_value=row):app.verify_revoke()
-                            driver.idle(60)
-                            _check(store.latest_action_record(platform.target_id)['operation_id']==before['operation_id'],'RECOVERY_OPERATION_CHANGED')
-                else:
+                            recovery = result['recovery'] = {'kind':'same_window',
+                                'before_operation_id':before['operation_id'], 'post_count_before_close':post_count}
+                            if case.get('reopen'):
+                                period_id = app.config.period_id
+                                driver.close()
+                                driver = None
+                                recovery.update(kind='desktop_window_reopen', first_window_closed=True)
+                                driver = _Driver(store,registry,config)
+                                app = driver.app
+                                reopened, count = _unknown_checkpoint(app, platform)
+                                _check(app.config.period_id == period_id and reopened == before,
+                                       'RECOVERY_ORIGINAL_LEDGER_OR_RECORD_CHANGED')
+                                recovery.update(reopened_operation_id=reopened['operation_id'],
+                                                ledger_period_id=period_id, post_count_after_reopen=count)
+                                app.login()
+                                driver.idle(60)
+                                _check(app.action_states.get('login') == '待登录', 'RECOVERY_LOGIN_FAILED')
+                            recovery.update(_verify_from_report(driver, platform, before))
+                        else:
+                            app.stop(quiet=True)
+                elif action!='review':
                     raise AssertionError('UNSUPPORTED_ACCEPTANCE_ACTION')
             result['status']=app.status_var.get()
             result['history']=action_history(store)
             result['open_obligations']=ResponsibilityRegistry(registry).open_obligations()
             truth=platform.snapshot();posts=[e for e in truth['events'] if e['kind']=='post_arrival']
             costs=[e for e in truth['events'] if e['kind']=='cost_read']
-            expected=not case.get('no_model') and Decimal(case.get('cost','1.25'))>=Decimal(case.get('quota','1'))
+            expected=action!='review' and not case.get('no_model') and Decimal(case.get('cost','1.25'))>=Decimal(case.get('quota','1'))
             _check(len(posts)==int(expected),'POST_COUNT_MISMATCH')
             _check(all(e['ids']==[platform.target_id] for e in costs),'READ_SCOPE_MISMATCH')
             unchanged=[x for x in truth['initial_keys'] if x['tracking_id']!=platform.target_id]
@@ -263,6 +410,9 @@ def _one_case(base,case,assets,chromium):
             else:
                 _check(truth['keys']==truth['initial_keys'],'UNAUTHORIZED_CHANGE')
             if case.get('no_model'):_check(not costs,'NO_MODEL_COST_QUERY')
+            if portable:
+                result['verified_outcome']=_verify_portable_outcome(
+                    store,platform,truth,costs,trace,action,first,result.get('recovery'))
             result.update(passed=True,actual_post_count=len(posts),actual_cost_queries=len(costs))
     except Exception as exc:
         result['error_type']=type(exc).__name__;result['error']=str(exc)
@@ -271,12 +421,26 @@ def _one_case(base,case,assets,chromium):
             try:driver.close();result['cleanup_passed']=True
             except Exception as exc:result['cleanup_passed']=False;result['cleanup_error']=str(exc);result['passed']=False
         result['elapsed_seconds']=round(time.monotonic()-started,3);result['dialogs']=dialogs
-        _write(folder/'backend-truth.json',platform.snapshot());platform.close()
+        truth=platform.snapshot();platform.close()
+        result['actual_post_count']=sum(e['kind']=='post_arrival' for e in truth['events'])
+        result['actual_cost_queries']=sum(e['kind']=='cost_read' for e in truth['events'])
+        result['history']=action_history(store)
+        result['open_obligations']=ResponsibilityRegistry(registry).open_obligations()
+        _write(folder/'backend-truth.json',truth)
         _write(folder/'result.json',result)
     return result
 
 
-def run_operator_acceptance(destination,*,assets=None,chromium=None,cases=None):
+def run_portable_operator_acceptance(destination,*,assets=None,chromium=None):
+    cases=[{'name':'read-only-fee-review','seed':7719,'action':'review','initial_cost':'0.80','quota':'1.00'},
+           {'name':'positive-quota-crossing','seed':7719,'action':'crossing','initial_cost':'0.80',
+            'cost':'1.05','quota':'1.00'},
+           {'name':'response-drop-restart','seed':7719,'action':'crossing','initial_cost':'0.80',
+            'cost':'1.05','quota':'1.00','fault':'response_drop','reopen':True}]
+    return run_operator_acceptance(destination,assets=assets,chromium=chromium,cases=cases,continue_after_failure=True)
+
+
+def run_operator_acceptance(destination,*,assets=None,chromium=None,cases=None,continue_after_failure=False):
     from .operator_runtime import assets_directory,verify_assets
     path=Path(destination).absolute()
     if not path.name.startswith('operator-acceptance-'):raise ValueError('NEW_OPERATOR_ACCEPTANCE_DIRECTORY_REQUIRED')
@@ -319,7 +483,7 @@ def run_operator_acceptance(destination,*,assets=None,chromium=None,cases=None):
             for case in plan:
                 result=_one_case(path,case,assets,chromium);report['cases'].append(result)
                 report['executed']=len(report['cases']);_write(path/'summary.json',report)
-                if not result['passed']:
+                if not result['passed'] and not continue_after_failure:
                     report['stop_reason']='case_failed';break
         report['passed']=len(report['cases'])==len(plan) and all(c['passed'] for c in report['cases'])
         if 'source_hashes' in report:

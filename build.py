@@ -237,14 +237,11 @@ def build(args: argparse.Namespace) -> Path:
         license_info = copy_notices(bundle, versions)
         (bundle / "templates").mkdir()
         shutil.copy2(template, bundle / "templates" / template.name)
-        for name in ("README.md", "使用说明.md", "验证计划.md", "THIRD-PARTY-NOTICES.md", "LICENSE", "NOTICE"):
+        shutil.copy2(ROOT / "docs" / "desktop-quickstart.txt", bundle / "使用说明.txt")
+        for name in ("THIRD-PARTY-NOTICES.md", "LICENSE", "NOTICE"):
             source = ROOT / name
             if source.is_file():
                 shutil.copy2(source, bundle / name)
-        for source in sorted((ROOT / "docs").glob("*.md")):
-            if source.is_file():
-                (bundle / "docs").mkdir(exist_ok=True)
-                shutil.copy2(source, bundle / "docs" / source.name)
         (bundle / "BUILD-INFO.json").write_text(json.dumps({
             **build_identity,
             "application_version": __import__('quota_guard').__version__,

@@ -16,8 +16,8 @@ def write_personnel_template(target: Path, source_template: Path, amount,
                              people_count: int = 14) -> None:
     """Preserve template styling while prefilling new blank rows with exact text.
 
-    A nonnegative template remains a draft until names are filled. Its blank
-    rows deliberately do not pass the normal personnel-import validation.
+    The application may import unnamed rows as drafts. They preserve the
+    default amounts and become actionable only after a valid name is filled.
     """
     selected_amount = money(amount, allow_skip=True)
     if selected_amount == 0:
