@@ -1,0 +1,107 @@
+{
+  "release_kind": "offline Windows desktop candidate",
+  "version": "0.2.0a3.dev2",
+  "runtime_commit": "23b33e9039b66da03fb47f4c69d8311e19c20dc3",
+  "build_id": "code-sha256-f6fd92260207610006e072561ded99ab6cb662e8c84b1054d031ea61984cbac4",
+  "source_tests": {
+    "count": 1415,
+    "seconds": 543.906,
+    "skips": 0
+  },
+  "package": {
+    "zip_sha256": "57b1ec79faa2ef5a420d1354b7964ff6f30d57aceef38c755af1e4f6fec2ce0d",
+    "zip_bytes": 3320831365,
+    "executable_sha256": "306cd2fc1c5ec077fcb14f9c46688bfa0f773f29109da4bba0eb3376e655807f",
+    "extracted_files_compared": 1556,
+    "extracted_ui_smoke_passed": true,
+    "browser_revisions": {
+      "chromium": "1248",
+      "ffmpeg": "1013",
+      "winldd": "1007"
+    },
+    "models": {
+      "web_operator": "Qwen3-4B-Instruct-2507 Q4_K_M",
+      "diagnostic_suggestions": "Qwen2.5-0.5B-Instruct Q4_K_M"
+    }
+  },
+  "portable_modes": [
+    "smoke",
+    "browser-smoke",
+    "ai-smoke",
+    "offline-acceptance",
+    "portable-operator-acceptance"
+  ],
+  "synthetic_workflows": [
+    "gui_template_import_sparse_rows",
+    "cooperative_close_cancels_timers",
+    "reopen_keeps_import_and_preferences",
+    "reopen_resumes_original_membership_plan_without_send",
+    "positive_quota_automatic_synthetic_send_once",
+    "under_quota_force_synthetic_send_once"
+  ],
+  "packaged_model_cases": [
+    {
+      "name": "read-only-fee-review",
+      "passed": true,
+      "run_seconds": 51.062,
+      "first_cost": "0.80",
+      "crossed_cost": null,
+      "cost_requests": 1,
+      "revoke_requests": 0,
+      "confirmed_control_preserved": true,
+      "remaining_obligations": 0,
+      "cleanup_passed": true
+    },
+    {
+      "name": "positive-quota-crossing",
+      "passed": true,
+      "run_seconds": 173.735,
+      "first_cost": "0.80",
+      "crossed_cost": "1.05",
+      "cost_requests": 2,
+      "revoke_requests": 1,
+      "confirmed_control_preserved": true,
+      "remaining_obligations": 0,
+      "cleanup_passed": true,
+      "permit_consumptions": 1,
+      "absence_receipts": 1,
+      "statuses": [
+        "pending",
+        "requested",
+        "absent_verified"
+      ]
+    },
+    {
+      "name": "response-drop-restart",
+      "passed": true,
+      "run_seconds": 176.265,
+      "first_cost": "0.80",
+      "crossed_cost": "1.05",
+      "cost_requests": 2,
+      "revoke_requests": 1,
+      "confirmed_control_preserved": true,
+      "remaining_obligations": 0,
+      "cleanup_passed": true,
+      "permit_consumptions": 1,
+      "absence_receipts": 2,
+      "statuses": [
+        "pending",
+        "requested",
+        "unknown_result",
+        "absent_verified"
+      ],
+      "recovery": {
+        "kind": "desktop_window_reopen",
+        "closed_original_window": true,
+        "same_operation_on_reopen_and_after_verification": true,
+        "posts_before_close_on_reopen_and_after_check": [
+          1,
+          1,
+          1
+        ]
+      }
+    }
+  ],
+  "real_platform": "not_performed",
+  "real_platform_requests": 0
+}
